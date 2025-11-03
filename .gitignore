@@ -322,3 +322,5 @@ frontend/node_modules/
 # Development Plans (sensitive information)
 REAL_TRADING_PLAN.md
 *_PLAN.md
+
+.api.yaml
