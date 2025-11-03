@@ -1,7 +1,9 @@
-from sqlalchemy import Column, Integer, String, DECIMAL, TIMESTAMP, ForeignKey, UniqueConstraint, Float, Date, DateTime, Text
+import datetime
+
+from sqlalchemy import (DECIMAL, TIMESTAMP, Column, Date, DateTime, Float,
+                        ForeignKey, Integer, String, Text, UniqueConstraint)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-import datetime
 
 from .connection import Base
 
@@ -52,6 +54,9 @@ class Account(Base):
     initial_capital = Column(DECIMAL(18, 2), nullable=False, default=10000.00)
     current_cash = Column(DECIMAL(18, 2), nullable=False, default=10000.00)
     frozen_cash = Column(DECIMAL(18, 2), nullable=False, default=0.00)
+    
+    # Trading Mode
+    trade_mode = Column(String(10), nullable=False, default="paper")  # "real" for Kraken real trading, "paper" for paper trading
     
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
     updated_at = Column(

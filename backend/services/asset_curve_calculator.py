@@ -9,11 +9,10 @@ import threading
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
+from database.models import Account, AccountAssetSnapshot
 from sqlalchemy import cast, func
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.types import Integer
-
-from database.models import Account, AccountAssetSnapshot
 
 logger = logging.getLogger(__name__)
 

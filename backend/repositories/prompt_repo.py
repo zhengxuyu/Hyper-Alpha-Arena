@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
-from sqlalchemy.orm import Session
+from database.models import Account, AccountPromptBinding, PromptTemplate
 from sqlalchemy import select
-
-from database.models import PromptTemplate, AccountPromptBinding, Account
+from sqlalchemy.orm import Session
 
 
 def get_all_templates(db: Session) -> List[PromptTemplate]:

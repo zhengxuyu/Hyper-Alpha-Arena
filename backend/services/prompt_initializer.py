@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-
-from config.prompt_templates import DEFAULT_PROMPT_TEMPLATE, PRO_PROMPT_TEMPLATE
+from config.prompt_templates import (DEFAULT_PROMPT_TEMPLATE,
+                                     PRO_PROMPT_TEMPLATE)
 from repositories import prompt_repo
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 SYSTEM_USER = "system"
 

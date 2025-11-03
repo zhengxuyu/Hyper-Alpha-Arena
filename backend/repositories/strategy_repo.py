@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
-from typing import Optional, List
-from sqlalchemy.orm import Session
+from typing import List, Optional
 
 from database.models import AccountStrategyConfig
+from sqlalchemy.orm import Session
 
 
 def get_strategy_by_account(db: Session, account_id: int) -> Optional[AccountStrategyConfig]:

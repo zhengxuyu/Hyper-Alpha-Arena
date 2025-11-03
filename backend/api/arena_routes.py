@@ -9,22 +9,15 @@ from math import sqrt
 from statistics import mean, pstdev
 from typing import Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import desc
-
 from database.connection import SessionLocal
-from database.models import (
-    Account,
-    Trade,
-    Position,
-    AIDecisionLog,
-    Order,
-    AccountStrategyConfig,
-)
+from database.models import (Account, AccountStrategyConfig, AIDecisionLog,
+                             Order, Position, Trade)
+from fastapi import APIRouter, Depends, Query
 from services.asset_calculator import calc_positions_value
-from services.price_cache import get_cached_price, cache_price
 from services.market_data import get_last_price
+from services.price_cache import cache_price, get_cached_price
+from sqlalchemy import desc
+from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/arena", tags=["arena"])
 

@@ -8,19 +8,18 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional, Any, List
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 from database.connection import SessionLocal
 from database.models import Account, AccountStrategyConfig
-from repositories.strategy_repo import (
-    get_strategy_by_account,
-    list_strategies,
-    upsert_strategy,
-)
-from services.market_events import subscribe_price_updates, unsubscribe_price_updates
+from repositories.strategy_repo import (get_strategy_by_account,
+                                        list_strategies, upsert_strategy)
+from services.market_events import (subscribe_price_updates,
+                                    unsubscribe_price_updates)
 from services.market_stream import start_market_stream
-from services.trading_commands import place_ai_driven_crypto_order, AI_TRADING_SYMBOLS
+from services.trading_commands import (AI_TRADING_SYMBOLS,
+                                       place_ai_driven_crypto_order)
 
 logger = logging.getLogger(__name__)
 
@@ -245,8 +244,18 @@ class StrategyManager:
                 details={"account_id": state.account_id}
             )
 
+            # Get trade_mode from account and pass it to trading function
+            # Note: The function will still check each account's own trade_mode
+            session = SessionLocal()
             try:
-                place_ai_driven_crypto_order(account_ids=[state.account_id])
+                account = session.query(Account).filter(Account.id == state.account_id).first()
+                trade_mode = account.trade_mode if account and account.trade_mode in ["real", "paper"] else "paper"
+            finally:
+                session.close()
+            
+            try:
+                # Pass trade_mode, but function will use each account's own trade_mode
+                place_ai_driven_crypto_order(account_ids=[state.account_id], trade_mode=trade_mode)
                 state.update_after_trigger(event_time)
                 system_logger.add_log(
                     level="INFO",

@@ -1,11 +1,12 @@
 """
 Hyperliquid market data service using CCXT
 """
-import ccxt
 import logging
-from typing import Dict, List, Any, Optional
-from datetime import datetime, timezone
 import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+import ccxt
 
 logger = logging.getLogger(__name__)
 

@@ -1,16 +1,16 @@
 """
 Ranking API routes for factor-based crypto rankings
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
 from typing import List, Optional
+
 import pandas as pd
 import requests
-from datetime import datetime, timedelta
-
 from database.connection import get_db
 from database.models import CryptoKline
 from factors import compute_all_factors, compute_selected_factors, list_factors
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/ranking", tags=["ranking"])
 

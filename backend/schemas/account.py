@@ -1,5 +1,6 @@
-from pydantic import BaseModel
 from typing import Optional
+
+from pydantic import BaseModel
 
 
 class AccountCreate(BaseModel):
@@ -18,6 +19,7 @@ class AccountUpdate(BaseModel):
     model: Optional[str] = None
     base_url: Optional[str] = None
     api_key: Optional[str] = None
+    trade_mode: Optional[str] = None  # "real" for Kraken real trading, "paper" for paper trading
 
 
 class AccountOut(BaseModel):
@@ -33,6 +35,7 @@ class AccountOut(BaseModel):
     frozen_cash: float
     account_type: str
     is_active: bool
+    trade_mode: str = "paper"  # "real" for Kraken real trading, "paper" for paper trading
 
     class Config:
         from_attributes = True

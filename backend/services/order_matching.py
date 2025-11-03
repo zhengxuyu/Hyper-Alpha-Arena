@@ -3,13 +3,16 @@ Order matching service
 Implements conditional execution logic for limit orders
 """
 
+import logging
 import uuid
 from decimal import Decimal
-from typing import Optional, Tuple, List
-from sqlalchemy.orm import Session
-import logging
+from typing import List, Optional, Tuple
 
-from database.models import Order, Position, Trade, Account, User, CRYPTO_MIN_COMMISSION, CRYPTO_COMMISSION_RATE, CRYPTO_MIN_ORDER_QUANTITY, CRYPTO_LOT_SIZE
+from database.models import (CRYPTO_COMMISSION_RATE, CRYPTO_LOT_SIZE,
+                             CRYPTO_MIN_COMMISSION, CRYPTO_MIN_ORDER_QUANTITY,
+                             Account, Order, Position, Trade, User)
+from sqlalchemy.orm import Session
+
 from .market_data import get_last_price
 
 logger = logging.getLogger(__name__)
@@ -301,7 +304,8 @@ def _execute_order(db: Session, order: Order, account: Account, execution_price:
 
         # Broadcast real-time updates via WebSocket
         import asyncio
-        from api.ws import broadcast_trade_update, broadcast_position_update
+
+        from api.ws import broadcast_position_update, broadcast_trade_update
         from repositories.position_repo import list_positions
 
         try:

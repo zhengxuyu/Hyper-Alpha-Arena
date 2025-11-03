@@ -2,21 +2,15 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-
 from database.connection import SessionLocal
+from database.models import Account, PromptTemplate
+from fastapi import APIRouter, Depends, HTTPException
 from repositories import prompt_repo
-from database.models import PromptTemplate, Account
-from schemas.prompt import (
-    PromptListResponse,
-    PromptTemplateUpdateRequest,
-    PromptTemplateRestoreRequest,
-    PromptTemplateResponse,
-    PromptBindingUpsertRequest,
-    PromptBindingResponse,
-)
-
+from schemas.prompt import (PromptBindingResponse, PromptBindingUpsertRequest,
+                            PromptListResponse, PromptTemplateResponse,
+                            PromptTemplateRestoreRequest,
+                            PromptTemplateUpdateRequest)
+from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/prompts", tags=["Prompt Templates"])
 

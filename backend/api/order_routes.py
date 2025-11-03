@@ -3,17 +3,20 @@ Order Management API Routes
 Provides functionality for creating, querying, and canceling orders
 """
 
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.orm import Session
-from typing import List, Optional
-from pydantic import BaseModel
 import logging
+from typing import List, Optional
 
 from database.connection import SessionLocal
-from database.models import User, Order, Account
+from database.models import Account, Order, User
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from repositories.user_repo import (set_user_password, user_has_password,
+                                    verify_auth_session, verify_user_password)
 from schemas.order import OrderCreate, OrderOut
-from services.order_matching import create_order, check_and_execute_order, get_pending_orders, cancel_order, process_all_pending_orders
-from repositories.user_repo import verify_user_password, user_has_password, set_user_password, verify_auth_session
+from services.order_matching import (cancel_order, check_and_execute_order,
+                                     create_order, get_pending_orders,
+                                     process_all_pending_orders)
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 

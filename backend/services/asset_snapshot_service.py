@@ -6,16 +6,15 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List
 
-from sqlalchemy.orm import Session
-
+from api.ws import broadcast_arena_asset_update, manager
 from database.connection import SessionLocal
 from database.models import Account, AccountAssetSnapshot, Position
 from services.asset_curve_calculator import invalidate_asset_curve_cache
 from services.market_data import get_last_price
-from api.ws import broadcast_arena_asset_update, manager
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 

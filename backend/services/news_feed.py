@@ -1,13 +1,12 @@
 import logging
 import re
+import xml.etree.ElementTree as ET
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
 from typing import List
-import xml.etree.ElementTree as ET
 
 import requests
-
 
 logger = logging.getLogger(__name__)
 

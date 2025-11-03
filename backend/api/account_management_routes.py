@@ -2,22 +2,20 @@
 Account Management API Routes - Handle CRUD operations for trading accounts
 """
 
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.orm import Session
-from typing import List
 import logging
+from typing import List
 
 from database.connection import SessionLocal
 from database.models import Account
-from repositories.account_repo import (
-    create_account, get_account, get_accounts_by_user,
-    update_account, update_account_cash, deactivate_account,
-    get_or_create_default_account
-)
-from repositories.user_repo import verify_auth_session, get_user
-from schemas.account import (
-    AccountCreate, AccountUpdate, AccountOut, AccountOverview
-)
+from fastapi import APIRouter, Depends, HTTPException
+from repositories.account_repo import (create_account, deactivate_account,
+                                       get_account, get_accounts_by_user,
+                                       get_or_create_default_account,
+                                       update_account, update_account_cash)
+from repositories.user_repo import get_user, verify_auth_session
+from schemas.account import (AccountCreate, AccountOut, AccountOverview,
+                             AccountUpdate)
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 

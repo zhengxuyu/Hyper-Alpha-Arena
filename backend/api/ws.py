@@ -2,22 +2,26 @@ import asyncio
 import json
 import logging
 import threading
+import traceback
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Dict, Optional, Set
 
+from database.connection import SessionLocal, get_session_for_mode
+from database.models import Account, AIDecisionLog, CryptoPrice, Trade, User
 from fastapi import WebSocket, WebSocketDisconnect
-from sqlalchemy.orm import Session
-
-from database.connection import SessionLocal
-from database.models import AIDecisionLog, Account, CryptoPrice, Trade, User
-from repositories.account_repo import get_account, get_or_create_default_account
+from repositories.account_repo import (get_account,
+                                       get_or_create_default_account)
 from repositories.order_repo import list_orders
 from repositories.position_repo import list_positions
 from repositories.user_repo import get_or_create_user, get_user
 from services.asset_calculator import calc_positions_value
 from services.asset_curve_calculator import get_all_asset_curves_data_new
 from services.market_data import get_last_price
-from services.scheduler import add_account_snapshot_job, remove_account_snapshot_job
+from services.order_matching import create_order
+from services.scheduler import (add_account_snapshot_job,
+                                remove_account_snapshot_job)
+from sqlalchemy.orm import Session
 
 
 class ConnectionManager:
@@ -329,7 +333,7 @@ async def _send_snapshot_optimized(db: Session, account_id: int):
             response_data["all_asset_curves"] = get_all_asset_curves_data(db, "1h")
             response_data["type"] = "snapshot_full"  # Indicate this includes full data
         except Exception as e:
-            logger.error(f"Failed to get asset curves: {e}")
+            logging.error(f"Failed to get asset curves: {e}")
 
     if price_error_message:
         response_data["warning"] = {
@@ -494,14 +498,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     break
                 continue
             kind = msg.get("type")
-            db: Session = SessionLocal()
+            db: Session = SessionLocal()  # Paper DB for account metadata
             try:
                 if kind == "bootstrap":
                     #  mode: Create or get default default user
                     username = msg.get("username", "default")
                     user = get_or_create_user(db, username)
                     
-                    # Get existing account for this user
+                    # Get existing account for this user (from paper DB - metadata storage)
                     account = get_or_create_default_account(
                         db,
                         user.id,
@@ -514,6 +518,32 @@ async def websocket_endpoint(websocket: WebSocket):
                         account_id = None
                     else:
                         account_id = account.id
+                        
+                        # Ensure account exists in target database based on trade_mode
+                        target_db = get_session_for_mode(account.trade_mode if account.trade_mode in ["real", "paper"] else "paper")
+                        try:
+                            # Check if account exists in target database
+                            existing = target_db.query(Account).filter(Account.id == account.id).first()
+                            if not existing:
+                                # Create account in target database
+                                new_account = Account(
+                                    id=account.id,
+                                    user_id=account.user_id,
+                                    name=account.name,
+                                    model=account.model,
+                                    base_url=account.base_url,
+                                    api_key=account.api_key,
+                                    trade_mode=account.trade_mode,
+                                    account_type=account.account_type,
+                                    initial_capital=account.initial_capital,
+                                    current_cash=account.current_cash if account.trade_mode == "paper" else account.initial_capital,
+                                    frozen_cash=Decimal('0'),
+                                    is_active=account.is_active,
+                                )
+                                target_db.add(new_account)
+                                target_db.commit()
+                        finally:
+                            target_db.close()
 
                     # Register the connection (handles None account_id gracefully)
                     manager.register(account_id, websocket)
@@ -521,12 +551,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Send bootstrap confirmation with account info
                     try:
                         if account:
-                            await manager.send_to_account(account_id, {
-                                "type": "bootstrap_ok",
-                                "user": {"id": user.id, "username": user.username},
-                                "account": {"id": account.id, "name": account.name, "user_id": account.user_id}
-                            })
-                            await _send_snapshot(db, account_id)
+                            # Use account's trade_mode database for snapshot
+                            account_db = get_session_for_mode(account.trade_mode if account.trade_mode in ["real", "paper"] else "paper")
+                            try:
+                                await manager.send_to_account(account_id, {
+                                    "type": "bootstrap_ok",
+                                    "user": {"id": user.id, "username": user.username},
+                                    "account": {"id": account.id, "name": account.name, "user_id": account.user_id}
+                                })
+                                await _send_snapshot(account_db, account_id)
+                            finally:
+                                account_db.close()
                         else:
                             # Send bootstrap with no account info
                             await websocket.send_text(json.dumps({
@@ -592,7 +627,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     if account_id is not None:
                         manager.unregister(account_id, websocket)
 
-                    # Get target account
+                    # Get target account from paper DB (metadata)
                     target_account = get_account(db, target_account_id)
                     if not target_account:
                         await websocket.send_text(json.dumps({"type": "error", "message": "account not found"}))
@@ -603,19 +638,34 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Register to new account
                     manager.register(account_id, websocket)
 
-                    # Send confirmation and snapshot
-                    await manager.send_to_account(account_id, {
-                        "type": "account_switched",
-                        "account": {
-                            "id": target_account.id,
-                            "user_id": target_account.user_id,
-                            "name": target_account.name
-                        }
-                    })
-                    await _send_snapshot(db, account_id)
+                    # Use account's trade_mode database for snapshot
+                    account_db = get_session_for_mode(target_account.trade_mode if target_account.trade_mode in ["real", "paper"] else "paper")
+                    try:
+                        # Send confirmation and snapshot
+                        await manager.send_to_account(account_id, {
+                            "type": "account_switched",
+                            "account": {
+                                "id": target_account.id,
+                                "user_id": target_account.user_id,
+                                "name": target_account.name
+                            }
+                        })
+                        await _send_snapshot(account_db, account_id)
+                    finally:
+                        account_db.close()
                 elif kind == "get_snapshot":
                     if account_id is not None:
-                        await _send_snapshot(db, account_id)
+                        # Get account from paper DB to check trade_mode
+                        account = get_account(db, account_id)
+                        if account:
+                            # Use account's trade_mode database
+                            account_db = get_session_for_mode(account.trade_mode if account.trade_mode in ["real", "paper"] else "paper")
+                            try:
+                                await _send_snapshot(account_db, account_id)
+                            finally:
+                                account_db.close()
+                        else:
+                            await _send_snapshot(db, account_id)  # Fallback to paper DB
                 elif kind == "get_asset_curve":
                     # Get asset curve data with specific timeframe
                     timeframe = msg.get("timeframe", "1h")
@@ -635,9 +685,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         continue
 
                     try:
-                        # Import the order creation service
-                        from services.order_matching import create_order
-
                         # Get account and user object
                         account = get_account(db, account_id)
                         if not account:
@@ -699,7 +746,6 @@ async def websocket_endpoint(websocket: WebSocket):
                             break
                     except Exception as e:
                         # Unexpected errors
-                        import traceback
                         print(f"Order placement error: {e}")
                         print(traceback.format_exc())
                         try:

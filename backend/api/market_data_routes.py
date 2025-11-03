@@ -3,12 +3,13 @@ Market data API routes
 Provides RESTful API interfaces for crypto market data
 """
 
-from fastapi import APIRouter, HTTPException
-from typing import List, Dict, Any, Optional
-from pydantic import BaseModel
 import logging
+from typing import Any, Dict, List, Optional
 
-from services.market_data import get_last_price, get_kline_data, get_market_status
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from services.market_data import (get_kline_data, get_last_price,
+                                  get_market_status)
 
 logger = logging.getLogger(__name__)
 

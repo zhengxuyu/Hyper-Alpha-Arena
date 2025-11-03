@@ -9,15 +9,14 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Trash2, Plus, Pencil } from 'lucide-react'
-import { 
+import { Plus, Pencil } from 'lucide-react'
+import {
   getAccounts as getAccounts,
   createAccount as createAccount,
   updateAccount as updateAccount,
   testLLMConnection,
   type TradingAccount,
-  type TradingAccountCreate,
-  type TradingAccountUpdate
+  type TradingAccountCreate
 } from '@/lib/api'
 
 interface SettingsDialogProps {
@@ -37,6 +36,7 @@ interface AIAccountCreate extends TradingAccountCreate {
   model?: string
   base_url?: string
   api_key?: string
+  trade_mode?: string  // Keep field but not shown in UI, controlled by global switch
 }
 
 export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, embedded = false }: SettingsDialogProps) {
@@ -54,6 +54,7 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
     base_url: '',
     api_key: 'default-key-please-update-in-settings',
     auto_trading_enabled: true,
+    trade_mode: 'paper',  // Default to paper, controlled by global switch
   })
   const [editAccount, setEditAccount] = useState<AIAccountCreate>({
     name: '',
@@ -61,6 +62,7 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
     base_url: '',
     api_key: 'default-key-please-update-in-settings',
     auto_trading_enabled: true,
+    trade_mode: 'paper',  // Default to paper, controlled by global switch
   })
 
   const loadAccounts = async () => {
@@ -130,7 +132,7 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
 
       console.log('Creating account with data:', newAccount)
       await createAccount(newAccount)
-      setNewAccount({ name: '', model: '', base_url: '', api_key: 'default-key-please-update-in-settings', auto_trading_enabled: true })
+      setNewAccount({ name: '', model: '', base_url: '', api_key: 'default-key-please-update-in-settings', auto_trading_enabled: true, trade_mode: 'paper' })
       setShowAddForm(false)
       await loadAccounts()
 
@@ -157,25 +159,25 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
       setTesting(true)
       setError(null)
       setTestResult(null)
-      
+
       if (!editAccount.name || !editAccount.name.trim()) {
         setError('Trader name is required')
         setLoading(false)
         setTesting(false)
         return
       }
-      
+
       // Test LLM connection first if AI model data is provided
       if (editAccount.model || editAccount.base_url || editAccount.api_key) {
         setTestResult('Testing LLM connection...')
-        
+
         try {
           const testResponse = await testLLMConnection({
             model: editAccount.model,
             base_url: editAccount.base_url,
             api_key: editAccount.api_key
           })
-          
+
           if (!testResponse.success) {
             setError(`LLM Test Failed: ${testResponse.message}`)
             setTestResult(`❌ Test failed: ${testResponse.message}`)
@@ -183,7 +185,7 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
             setTesting(false)
             return
           }
-          
+
           setTestResult('✅ LLM connection test passed!')
         } catch (testError) {
           const errorMessage = testError instanceof Error ? testError.message : 'LLM connection test failed'
@@ -194,19 +196,19 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
           return
         }
       }
-      
+
       setTesting(false)
       setTestResult('Test passed! Saving AI trader...')
 
       console.log('Updating account with data:', editAccount)
       await updateAccount(editingId, editAccount)
       setEditingId(null)
-      setEditAccount({ name: '', model: '', base_url: '', api_key: '', auto_trading_enabled: true })
+      setEditAccount({ name: '', model: '', base_url: '', api_key: '', auto_trading_enabled: true, trade_mode: 'paper' })
       setTestResult(null)
       await loadAccounts()
-      
+
       toast.success('AI trader updated successfully!')
-      
+
       // Notify parent component that account was updated
       onAccountUpdated?.()
     } catch (error) {
@@ -234,7 +236,7 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
 
   const cancelEdit = () => {
     setEditingId(null)
-    setEditAccount({ name: '', model: '', base_url: '', api_key: 'default-key-please-update-in-settings', auto_trading_enabled: true })
+    setEditAccount({ name: '', model: '', base_url: '', api_key: 'default-key-please-update-in-settings', auto_trading_enabled: true, trade_mode: 'paper' })
     setTestResult(null)
     setError(null)
   }
@@ -274,183 +276,182 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
         </div>
       )}
 
-        <div className="space-y-6">
-          {/* Existing Accounts */}
-          <div className="space-y-4 flex-1 flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between">
-              <Button
-                onClick={() => setShowAddForm(!showAddForm)}
-                size="sm"
-                className="flex items-center gap-2"
-              >
-                <Plus className="h-4 w-4" />
-                Add AI Trader
-              </Button>
-            </div>
+      <div className="space-y-6">
+        {/* Existing Accounts */}
+        <div className="space-y-4 flex-1 flex flex-col overflow-hidden">
+          <div className="flex items-center justify-between">
+            <Button
+              onClick={() => setShowAddForm(!showAddForm)}
+              size="sm"
+              className="flex items-center gap-2"
+            >
+              <Plus className="h-4 w-4" />
+              Add AI Trader
+            </Button>
+          </div>
 
-            {loading && accounts.length === 0 ? (
-              <div>Loading AI traders...</div>
-            ) : (
-              <div className="space-y-3 overflow-y-auto" style={{maxHeight: 'calc(100vh - 300px)'}}>
-                {/* Add New Account Form */}
-                {showAddForm && (
-                  <div className="space-y-4 border rounded-lg p-4 bg-muted/50">
-                    <h3 className="text-lg font-medium">Add New AI Trader</h3>
+          {loading && accounts.length === 0 ? (
+            <div>Loading AI traders...</div>
+          ) : (
+            <div className="space-y-3 overflow-y-auto" style={{ maxHeight: 'calc(100vh - 300px)' }}>
+              {/* Add New Account Form */}
+              {showAddForm && (
+                <div className="space-y-4 border rounded-lg p-4 bg-muted/50">
+                  <h3 className="text-lg font-medium">Add New AI Trader</h3>
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <Input
+                        placeholder="Trader name"
+                        value={newAccount.name || ''}
+                        onChange={(e) => setNewAccount({ ...newAccount, name: e.target.value })}
+                      />
+                      <Input
+                        placeholder="Model (e.g., gpt-4)"
+                        value={newAccount.model || ''}
+                        onChange={(e) => setNewAccount({ ...newAccount, model: e.target.value })}
+                      />
+                    </div>
+                    <Input
+                      placeholder="Base URL (e.g., https://api.openai.com/v1)"
+                      value={newAccount.base_url || ''}
+                      onChange={(e) => setNewAccount({ ...newAccount, base_url: e.target.value })}
+                    />
+                    <Input
+                      placeholder="API Key"
+                      type="password"
+                      value={newAccount.api_key || ''}
+                      onChange={(e) => setNewAccount({ ...newAccount, api_key: e.target.value })}
+                    />
+                    <label className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4"
+                        checked={newAccount.auto_trading_enabled ?? true}
+                        onChange={(e) => setNewAccount({ ...newAccount, auto_trading_enabled: e.target.checked })}
+                      />
+                      <span>Start Trading</span>
+                    </label>
+                    <div className="flex gap-2">
+                      <Button onClick={handleCreateAccount} disabled={loading}>
+                        Test and Create
+                      </Button>
+                      <Button variant="outline" onClick={() => setShowAddForm(false)}>
+                        Cancel
+                      </Button>
+                    </div>
+                    {testResult && (
+                      <div className="text-sm text-muted-foreground">
+                        {testResult}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {accounts.map((account) => (
+                <div key={account.id} className="border rounded-lg p-4">
+                  {editingId === account.id ? (
                     <div className="space-y-3">
                       <div className="grid grid-cols-2 gap-3">
                         <Input
                           placeholder="Trader name"
-                          value={newAccount.name || ''}
-                          onChange={(e) => setNewAccount({ ...newAccount, name: e.target.value })}
+                          value={editAccount.name || ''}
+                          onChange={(e) => setEditAccount({ ...editAccount, name: e.target.value })}
                         />
                         <Input
-                          placeholder="Model (e.g., gpt-4)"
-                          value={newAccount.model || ''}
-                          onChange={(e) => setNewAccount({ ...newAccount, model: e.target.value })}
+                          placeholder="Model"
+                          value={editAccount.model || ''}
+                          onChange={(e) => setEditAccount({ ...editAccount, model: e.target.value })}
                         />
                       </div>
                       <Input
-                        placeholder="Base URL (e.g., https://api.openai.com/v1)"
-                        value={newAccount.base_url || ''}
-                        onChange={(e) => setNewAccount({ ...newAccount, base_url: e.target.value })}
+                        placeholder="Base URL"
+                        value={editAccount.base_url || ''}
+                        onChange={(e) => setEditAccount({ ...editAccount, base_url: e.target.value })}
                       />
                       <Input
                         placeholder="API Key"
                         type="password"
-                        value={newAccount.api_key || ''}
-                        onChange={(e) => setNewAccount({ ...newAccount, api_key: e.target.value })}
+                        value={editAccount.api_key || ''}
+                        onChange={(e) => setEditAccount({ ...editAccount, api_key: e.target.value })}
                       />
                       <label className="flex items-center gap-2 text-sm text-muted-foreground">
                         <input
                           type="checkbox"
                           className="h-4 w-4"
-                          checked={newAccount.auto_trading_enabled ?? true}
-                          onChange={(e) => setNewAccount({ ...newAccount, auto_trading_enabled: e.target.checked })}
+                          checked={editAccount.auto_trading_enabled ?? true}
+                          onChange={(e) => setEditAccount({ ...editAccount, auto_trading_enabled: e.target.checked })}
                         />
                         <span>Start Trading</span>
                       </label>
-                      <div className="flex gap-2">
-                        <Button onClick={handleCreateAccount} disabled={loading}>
-                          Test and Create
-                        </Button>
-                        <Button variant="outline" onClick={() => setShowAddForm(false)}>
-                          Cancel
-                        </Button>
-                      </div>
                       {testResult && (
-                        <div className="text-sm text-muted-foreground">
+                        <div className={`text-xs p-2 rounded ${testResult.includes('❌')
+                          ? 'bg-red-50 text-red-700 border border-red-200'
+                          : 'bg-green-50 text-green-700 border border-green-200'
+                          }`}>
                           {testResult}
                         </div>
                       )}
+                      <div className="flex gap-2">
+                        <Button onClick={handleUpdateAccount} disabled={loading || testing} size="sm">
+                          {testing ? 'Testing...' : 'Test and Save'}
+                        </Button>
+                        <Button onClick={cancelEdit} variant="outline" size="sm" disabled={loading || testing}>
+                          Cancel
+                        </Button>
+                      </div>
                     </div>
-                  </div>
-                )}
-
-                {accounts.map((account) => (
-                  <div key={account.id} className="border rounded-lg p-4">
-                    {editingId === account.id ? (
-                      <div className="space-y-3">
-                        <div className="grid grid-cols-2 gap-3">
-                          <Input
-                            placeholder="Trader name"
-                            value={editAccount.name || ''}
-                            onChange={(e) => setEditAccount({ ...editAccount, name: e.target.value })}
-                          />
-                          <Input
-                            placeholder="Model"
-                            value={editAccount.model || ''}
-                            onChange={(e) => setEditAccount({ ...editAccount, model: e.target.value })}
-                          />
+                  ) : (
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="space-y-1 flex-1">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="font-medium">{account.name}</div>
+                          <label className="flex items-center gap-2 text-xs text-muted-foreground whitespace-nowrap">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4"
+                              checked={account.auto_trading_enabled ?? true}
+                              disabled={toggleLoadingId === account.id || loading}
+                              onChange={(e) => handleToggleAutoTrading(account, e.target.checked)}
+                            />
+                            <span>Start Trading</span>
+                          </label>
                         </div>
-                        <Input
-                          placeholder="Base URL"
-                          value={editAccount.base_url || ''}
-                          onChange={(e) => setEditAccount({ ...editAccount, base_url: e.target.value })}
-                        />
-                        <Input
-                          placeholder="API Key"
-                          type="password"
-                          value={editAccount.api_key || ''}
-                          onChange={(e) => setEditAccount({ ...editAccount, api_key: e.target.value })}
-                        />
-                        <label className="flex items-center gap-2 text-sm text-muted-foreground">
-                          <input
-                            type="checkbox"
-                            className="h-4 w-4"
-                            checked={editAccount.auto_trading_enabled ?? true}
-                            onChange={(e) => setEditAccount({ ...editAccount, auto_trading_enabled: e.target.checked })}
-                          />
-                          <span>Start Trading</span>
-                        </label>
-                        {testResult && (
-                          <div className={`text-xs p-2 rounded ${
-                            testResult.includes('❌') 
-                              ? 'bg-red-50 text-red-700 border border-red-200' 
-                              : 'bg-green-50 text-green-700 border border-green-200'
-                          }`}>
-                            {testResult}
+                        <div className="text-xs text-muted-foreground">
+                          {account.model ? `Model: ${account.model}` : 'No model configured'}
+                        </div>
+                        {account.base_url && (
+                          <div className="text-xs text-muted-foreground truncate">
+                            Base URL: {account.base_url}
                           </div>
                         )}
-                        <div className="flex gap-2">
-                          <Button onClick={handleUpdateAccount} disabled={loading || testing} size="sm">
-                            {testing ? 'Testing...' : 'Test and Save'}
-                          </Button>
-                          <Button onClick={cancelEdit} variant="outline" size="sm" disabled={loading || testing}>
-                            Cancel
-                          </Button>
+                        {account.api_key && (
+                          <div className="text-xs text-muted-foreground truncate max-w-full">
+                            API Key: {'*'.repeat(Math.min(20, Math.max(0, (account.api_key?.length || 0) - 4)))}{account.api_key?.slice(-4) || '****'}
+                          </div>
+                        )}
+                        <div className="text-xs text-muted-foreground">
+                          Cash: ${account.current_cash?.toLocaleString() || '0'}
                         </div>
                       </div>
-                    ) : (
-                      <div className="flex items-center justify-between gap-4">
-                        <div className="space-y-1 flex-1">
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="font-medium">{account.name}</div>
-                            <label className="flex items-center gap-2 text-xs text-muted-foreground whitespace-nowrap">
-                              <input
-                                type="checkbox"
-                                className="h-4 w-4"
-                                checked={account.auto_trading_enabled ?? true}
-                                disabled={toggleLoadingId === account.id || loading}
-                                onChange={(e) => handleToggleAutoTrading(account, e.target.checked)}
-                              />
-                              <span>Start Trading</span>
-                            </label>
-                          </div>
-                          <div className="text-xs text-muted-foreground">
-                            {account.model ? `Model: ${account.model}` : 'No model configured'}
-                          </div>
-                          {account.base_url && (
-                            <div className="text-xs text-muted-foreground truncate">
-                              Base URL: {account.base_url}
-                            </div>
-                          )}
-                          {account.api_key && (
-                            <div className="text-xs text-muted-foreground truncate max-w-full">
-                              API Key: {'*'.repeat(Math.min(20, Math.max(0, (account.api_key?.length || 0) - 4)))}{account.api_key?.slice(-4) || '****'}
-                            </div>
-                          )}
-                          <div className="text-xs text-muted-foreground">
-                            Cash: ${account.current_cash?.toLocaleString() || '0'}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <Button
-                            onClick={() => startEdit(account)}
-                            variant="outline"
-                            size="sm"
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                        </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          onClick={() => startEdit(account)}
+                          variant="outline"
+                          size="sm"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
                       </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
+
+      </div>
     </>
   )
 

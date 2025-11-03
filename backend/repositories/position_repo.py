@@ -1,6 +1,7 @@
-from sqlalchemy.orm import Session
-from database.models import Position
 from typing import List, Optional
+
+from database.models import Position
+from sqlalchemy.orm import Session
 
 
 def list_positions(db: Session, account_id: int) -> List[Position]:

@@ -3,8 +3,9 @@ System Log API Routes
 提供系统日志查询接口
 """
 
+from typing import Any, Dict, List, Optional
+
 from fastapi import APIRouter, Query
-from typing import Optional, List, Dict, Any
 from services.system_logger import system_logger
 
 router = APIRouter(prefix="/api/system-logs", tags=["System Logs"])

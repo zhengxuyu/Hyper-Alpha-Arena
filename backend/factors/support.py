@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Dict, Optional, List
-import pandas as pd
-import numpy as np
+from typing import Dict, List, Optional
 
+import numpy as np
+import pandas as pd
 from models import Factor
 
 

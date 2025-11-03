@@ -1,11 +1,12 @@
 """
 Crypto-specific API routes
 """
-from fastapi import APIRouter, HTTPException
-from typing import List, Dict, Any
 import logging
+from typing import Any, Dict, List
 
-from services.market_data import get_all_symbols, get_last_price, get_market_status
+from fastapi import APIRouter, HTTPException
+from services.market_data import (get_all_symbols, get_last_price,
+                                  get_market_status)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/crypto", tags=["crypto"])

@@ -322,3 +322,6 @@ frontend/node_modules/
 # Development Plans (sensitive information)
 REAL_TRADING_PLAN.md
 *_PLAN.md
+
+kraken/token_map.yaml
+.api.yaml

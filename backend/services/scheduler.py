@@ -3,16 +3,16 @@ Scheduled task scheduler service
 Used to manage WebSocket snapshot updates and other scheduled tasks
 """
 
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy.orm import Session
-from sqlalchemy import func
-from typing import Dict, Set, Callable, Optional, List
 import logging
 from datetime import date, datetime
+from typing import Callable, Dict, List, Optional, Set
 
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 from database.connection import SessionLocal
-from database.models import Position, CryptoPrice
+from database.models import CryptoPrice, Position
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +158,7 @@ class TaskScheduler:
         start_time = datetime.now()
         try:
             # Dynamic import to avoid circular dependency
-            from api.ws import manager, _send_snapshot_optimized
+            from api.ws import _send_snapshot_optimized, manager
 
             # Check if account still has active connections
             if account_id not in manager.active_connections:
@@ -296,8 +296,8 @@ def setup_market_tasks():
 def _ensure_market_data_ready() -> None:
     """Prefetch required market data before enabling trading tasks"""
     try:
-        from services.trading_commands import AI_TRADING_SYMBOLS
         from services.market_data import get_last_price
+        from services.trading_commands import AI_TRADING_SYMBOLS
 
         missing_symbols: List[str] = []
 
@@ -329,7 +329,7 @@ def reset_auto_trading_job():
         # Import constants from auto_trader module
         from services.auto_trader import AI_TRADE_JOB_ID
         from services.trading_commands import place_ai_driven_crypto_order
-        
+
         # Define interval (5 minutes)
         AI_TRADE_INTERVAL_SECONDS = 300
         
@@ -363,6 +363,7 @@ def reset_auto_trading_job():
 def start_asset_curve_broadcast():
     """Start asset curve broadcast task - broadcasts every 60 seconds"""
     import asyncio
+
     from api.ws import broadcast_asset_curve_update
 
     def broadcast_all_timeframes():

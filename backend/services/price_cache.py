@@ -2,11 +2,11 @@
 Price caching service to reduce API calls and provide short-term history.
 """
 
-import time
-from typing import Deque, Dict, List, Optional, Tuple
 import logging
-from threading import Lock
+import time
 from collections import deque
+from threading import Lock
+from typing import Deque, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 

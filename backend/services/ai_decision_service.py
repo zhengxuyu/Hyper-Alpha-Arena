@@ -1,25 +1,23 @@
 """
 AI Decision Service - Handles AI model API calls for trading decisions
 """
+import json
 import logging
 import random
-import json
-import time
 import re
-from decimal import Decimal
-from typing import Any, Dict, Optional, List
+import time
 from datetime import datetime
+from decimal import Decimal
+from typing import Any, Dict, List, Optional
 
 import requests
-from sqlalchemy.orm import Session
-
-from database.models import Position, Account, AIDecisionLog
+from database.models import Account, AIDecisionLog, Position
+from repositories import prompt_repo
+from repositories.strategy_repo import set_last_trigger
 from services.asset_calculator import calc_positions_value
 from services.news_feed import fetch_latest_news
-from repositories.strategy_repo import set_last_trigger
 from services.system_logger import system_logger
-from repositories import prompt_repo
-
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -665,6 +663,7 @@ def save_ai_decision(db: Session, account: Account, decision: Dict, portfolio: D
 
         # Broadcast AI decision update via WebSocket
         import asyncio
+
         from api.ws import broadcast_model_chat_update
 
         try:

@@ -1,6 +1,6 @@
 // API configuration
-const API_BASE_URL = process.env.NODE_ENV === 'production' 
-  ? '/api' 
+const API_BASE_URL = process.env.NODE_ENV === 'production'
+  ? '/api'
   : '/api'  // Use proxy, don't hardcode port
 
 // Hardcoded user for paper trading (matches backend initialization)
@@ -8,11 +8,11 @@ const HARDCODED_USERNAME = 'default'
 
 // Helper function for making API requests
 export async function apiRequest(
-  endpoint: string, 
+  endpoint: string,
   options: RequestInit = {}
 ): Promise<Response> {
   const url = `${API_BASE_URL}${endpoint}`
-  
+
   const defaultOptions: RequestInit = {
     headers: {
       'Content-Type': 'application/json',
@@ -20,9 +20,9 @@ export async function apiRequest(
     },
     ...options,
   }
-  
+
   const response = await fetch(url, defaultOptions)
-  
+
   if (!response.ok) {
     // Try to extract error message from response body
     try {
@@ -34,12 +34,12 @@ export async function apiRequest(
       throw new Error(`HTTP error! status: ${response.status}`)
     }
   }
-  
+
   const contentType = response.headers.get('content-type')
   if (!contentType || !contentType.includes('application/json')) {
     throw new Error('Response is not JSON')
   }
-  
+
   return response
 }
 
@@ -102,10 +102,10 @@ export async function getAIDecisions(accountId: number, filters?: AIDecisionFilt
   if (filters?.start_date) params.append('start_date', filters.start_date)
   if (filters?.end_date) params.append('end_date', filters.end_date)
   if (filters?.limit) params.append('limit', filters.limit.toString())
-  
+
   const queryString = params.toString()
   const endpoint = `/accounts/${accountId}/ai-decisions${queryString ? `?${queryString}` : ''}`
-  
+
   const response = await apiRequest(endpoint)
   return response.json()
 }
@@ -155,6 +155,7 @@ export interface TradingAccount {
   account_type: string  // "AI" or "MANUAL"
   is_active: boolean
   auto_trading_enabled?: boolean
+  trade_mode?: string  // "real" for Kraken real trading, "paper" for paper trading
 }
 
 export interface TradingAccountCreate {
@@ -173,6 +174,7 @@ export interface TradingAccountUpdate {
   base_url?: string
   api_key?: string
   auto_trading_enabled?: boolean
+  trade_mode?: string  // "real" for Kraken real trading, "paper" for paper trading
 }
 
 export type StrategyTriggerMode = 'realtime' | 'interval' | 'tick_batch'
@@ -342,6 +344,21 @@ export async function getAccounts(): Promise<TradingAccount[]> {
 
 export async function getOverview(): Promise<any> {
   const response = await apiRequest('/account/overview')
+  return response.json()
+}
+
+export async function switchGlobalTradeMode(tradeMode: 'real' | 'paper'): Promise<any> {
+  const response = await apiRequest('/account/switch-trade-mode', {
+    method: 'POST',
+    body: JSON.stringify({ trade_mode: tradeMode }),
+  })
+  return response.json()
+}
+
+export async function syncAllAccountsFromKraken(): Promise<any> {
+  const response = await apiRequest('/account/sync-all-from-kraken', {
+    method: 'POST',
+  })
   return response.json()
 }
 

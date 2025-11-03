@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Dict, Optional, List, Callable, Any
-import pandas as pd
 from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
+
+import pandas as pd
 
 
 @dataclass

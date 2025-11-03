@@ -3,18 +3,18 @@
 import logging
 import threading
 
-from services.auto_trader import (
-    place_ai_driven_crypto_order,
-    place_random_crypto_order,
-    AUTO_TRADE_JOB_ID,
-    AI_TRADE_JOB_ID
-)
-from services.scheduler import start_scheduler, setup_market_tasks, task_scheduler
-from services.market_stream import start_market_stream, stop_market_stream
-from services.market_events import subscribe_price_updates, unsubscribe_price_updates
 from services.asset_snapshot_service import handle_price_update
+from services.auto_trader import (AI_TRADE_JOB_ID, AUTO_TRADE_JOB_ID,
+                                  place_ai_driven_crypto_order,
+                                  place_random_crypto_order)
+from services.market_events import (subscribe_price_updates,
+                                    unsubscribe_price_updates)
+from services.market_stream import start_market_stream, stop_market_stream
+from services.scheduler import (setup_market_tasks, start_scheduler,
+                                task_scheduler)
 from services.trading_commands import AI_TRADING_SYMBOLS
-from services.trading_strategy import start_trading_strategy_manager, stop_trading_strategy_manager
+from services.trading_strategy import (start_trading_strategy_manager,
+                                       stop_trading_strategy_manager)
 
 logger = logging.getLogger(__name__)
 
@@ -98,12 +98,9 @@ def schedule_auto_trading(interval_seconds: int = 300, max_ratio: float = 0.2, u
         max_ratio: Maximum portion of portfolio to use per trade
         use_ai: If True, use AI-driven trading; if False, use random trading
     """
-    from services.auto_trader import (
-        place_ai_driven_crypto_order,
-        place_random_crypto_order,
-        AUTO_TRADE_JOB_ID,
-        AI_TRADE_JOB_ID
-    )
+    from services.auto_trader import (AI_TRADE_JOB_ID, AUTO_TRADE_JOB_ID,
+                                      place_ai_driven_crypto_order,
+                                      place_random_crypto_order)
 
     def execute_trade():
         try:

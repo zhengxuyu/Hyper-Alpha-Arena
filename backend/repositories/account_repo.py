@@ -1,7 +1,8 @@
-from sqlalchemy.orm import Session
-from typing import Optional, List
-from database.models import Account, User
 from decimal import Decimal
+from typing import List, Optional
+
+from database.models import Account, User
+from sqlalchemy.orm import Session
 
 
 def create_account(

@@ -2,21 +2,32 @@
 Account and Asset Curve API Routes (Cleaned)
 """
 
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.orm import Session
-from sqlalchemy import func
-from typing import List
+import asyncio
+import json
+import logging
+import threading
+import requests
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-import logging
+from typing import List
 
-from database.connection import SessionLocal
-from database.models import Account, Position, Trade, CryptoPrice, AccountAssetSnapshot
-from services.asset_curve_calculator import invalidate_asset_curve_cache
-from services.ai_decision_service import build_chat_completion_endpoints, _extract_text_from_message
-from schemas.account import StrategyConfig, StrategyConfigUpdate
+from api.ws import manager as ws_manager, _send_snapshot_optimized
+from database.connection import SessionLocal, get_session_for_mode
+from database.models import (Account, AccountAssetSnapshot, CryptoPrice, Order,
+                             Position, Trade, User)
+from fastapi import APIRouter, Depends, HTTPException
 from repositories.strategy_repo import get_strategy_by_account, upsert_strategy
+from schemas.account import StrategyConfig, StrategyConfigUpdate
+from services.ai_decision_service import (_extract_text_from_message,
+                                          build_chat_completion_endpoints)
+from services.asset_calculator import calc_positions_value
+from services.asset_curve_calculator import invalidate_asset_curve_cache
+from services.kraken_sync import sync_account_from_kraken
+from services.market_data import get_kline_data
+from services.scheduler import reset_auto_trading_job
 from services.trading_strategy import strategy_manager
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +78,6 @@ def _serialize_strategy(account: Account, strategy) -> StrategyConfig:
 async def list_all_accounts(db: Session = Depends(get_db)):
     """Get all active accounts (for paper trading demo)"""
     try:
-        from database.models import User
         accounts = db.query(Account).filter(Account.is_active == "true").all()
         
         result = []
@@ -109,7 +119,6 @@ async def get_specific_account_overview(account_id: int, db: Session = Depends(g
             raise HTTPException(status_code=404, detail="Account not found")
         
         # Calculate positions value for this specific account
-        from services.asset_calculator import calc_positions_value
         positions_value = float(calc_positions_value(db, account.id) or 0.0)
         
         # Count positions and pending orders for this account
@@ -234,7 +243,6 @@ async def get_account_overview(db: Session = Depends(get_db)):
             raise HTTPException(status_code=404, detail="No active account found")
         
         # Calculate positions value
-        from services.asset_calculator import calc_positions_value
         positions_value = float(calc_positions_value(db, account.id) or 0.0)
         
         # Count positions and pending orders
@@ -275,8 +283,6 @@ async def get_account_overview(db: Session = Depends(get_db)):
 async def create_new_account(payload: dict, db: Session = Depends(get_db)):
     """Create a new account for the default user (for paper trading demo)"""
     try:
-        from database.models import User
-        
         # Get the default user (or first user)
         user = db.query(User).filter(User.username == "default").first()
         if not user:
@@ -337,10 +343,8 @@ async def create_new_account(payload: dict, db: Session = Depends(get_db)):
             )
 
         # Reset auto trading job after creating new account (async in background to avoid blocking response)
-        import threading
         def reset_job_async():
             try:
-                from services.scheduler import reset_auto_trading_job
                 reset_auto_trading_job()
                 logger.info("Auto trading job reset successfully after account creation")
             except Exception as e:
@@ -371,6 +375,178 @@ async def create_new_account(payload: dict, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Failed to create account: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create account: {str(e)}")
+
+
+@router.post("/sync-all-from-kraken")
+async def sync_all_accounts_from_kraken(db: Session = Depends(get_db)):
+    """Sync all accounts from Kraken (for real trading mode)"""
+    try:
+        accounts = db.query(Account).filter(
+            Account.is_active == "true",
+            Account.trade_mode == "real"
+        ).all()
+        
+        results = {}
+        for account in accounts:
+            try:
+                sync_results = sync_account_from_kraken(db, account)
+                results[account.id] = {
+                    "account_name": account.name,
+                    "success": all(sync_results.values()),
+                    "balance_synced": sync_results.get("balance", False),
+                    "positions_synced": sync_results.get("positions", False),
+                    "orders_synced": sync_results.get("orders", False),
+                }
+            except Exception as e:
+                logger.error(f"Failed to sync account {account.id}: {e}", exc_info=True)
+                results[account.id] = {
+                    "account_name": account.name,
+                    "success": False,
+                    "error": str(e)
+                }
+        
+        # Broadcast update to all WebSocket connections to refresh data
+        try:
+            async def refresh_all_clients():
+                for account_id in list(ws_manager.active_connections.keys()):
+                    try:
+                        await _send_snapshot_optimized(db, account_id)
+                    except Exception as e:
+                        logger.warning(f"Failed to send refresh to account {account_id}: {e}")
+            
+            # Use ws_manager's schedule_task to safely run async function
+            ws_manager.schedule_task(refresh_all_clients())
+        except Exception as e:
+            logger.warning(f"Failed to broadcast refresh to WebSocket clients: {e}")
+        
+        return {
+            "message": f"Synced {len([r for r in results.values() if r.get('success')])} accounts successfully",
+            "results": results
+        }
+    except Exception as e:
+        logger.error(f"Failed to sync accounts from Kraken: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to sync accounts: {str(e)}")
+
+
+@router.post("/switch-trade-mode")
+async def switch_global_trade_mode(payload: dict, db: Session = Depends(get_db)):
+    """Switch all accounts to a global trade mode and sync if switching to real"""
+    try:
+        trade_mode = payload.get("trade_mode")
+        if trade_mode not in ["real", "paper"]:
+            raise HTTPException(status_code=400, detail="Invalid trade_mode. Must be 'real' or 'paper'")
+        
+        # Accounts metadata stored in paper database
+        accounts = db.query(Account).filter(Account.is_active == "true").all()
+        
+        # Update trade_mode in paper database (metadata)
+        for account in accounts:
+            account.trade_mode = trade_mode
+        
+        db.commit()
+        
+        # Sync accounts to target database (real or paper)
+        target_db = get_session_for_mode(trade_mode)
+        try:
+            for account in accounts:
+                # Check if account exists in target database
+                existing_account = target_db.query(Account).filter(Account.id == account.id).first()
+                
+                if existing_account:
+                    # Update existing account
+                    existing_account.name = account.name
+                    existing_account.model = account.model
+                    existing_account.base_url = account.base_url
+                    existing_account.api_key = account.api_key
+                    existing_account.trade_mode = trade_mode
+                    existing_account.account_type = account.account_type
+                    existing_account.is_active = account.is_active
+                    # Don't overwrite current_cash if switching to real (will be synced from Kraken)
+                    if trade_mode == "paper":
+                        existing_account.current_cash = account.current_cash
+                else:
+                    # Create new account in target database
+                    new_account = Account(
+                        id=account.id,  # Keep same ID for consistency
+                        user_id=account.user_id,
+                        name=account.name,
+                        model=account.model,
+                        base_url=account.base_url,
+                        api_key=account.api_key,
+                        trade_mode=trade_mode,
+                        account_type=account.account_type,
+                        initial_capital=account.initial_capital,
+                        current_cash=account.current_cash if trade_mode == "paper" else account.initial_capital,
+                        frozen_cash=Decimal('0'),
+                        is_active=account.is_active,
+                    )
+                    target_db.add(new_account)
+            
+            target_db.commit()
+            logger.info(f"Synced {len(accounts)} accounts to {trade_mode} trading database")
+        except Exception as e:
+            target_db.rollback()
+            logger.error(f"Failed to sync accounts to {trade_mode} database: {e}", exc_info=True)
+        finally:
+            target_db.close()
+        
+        # Note: Don't refresh here - wait until after sync completes
+        # This prevents showing stale paper trading data
+        
+        # If switching to real mode, sync all accounts from Kraken
+        # Do this AFTER initial refresh, then refresh again when done
+        if trade_mode == "real":
+            real_db = get_session_for_mode("real")
+            sync_results = {}
+            try:
+                for account in accounts:
+                    try:
+                        # Get account from real database
+                        account_in_real_db = real_db.query(Account).filter(Account.id == account.id).first()
+                        if account_in_real_db:
+                            sync_result = sync_account_from_kraken(real_db, account_in_real_db)
+                            sync_results[account.id] = sync_result
+                        else:
+                            logger.warning(f"Account {account.id} not found in real database, skipping sync")
+                            sync_results[account.id] = {"error": "Account not found in real database"}
+                    except Exception as e:
+                        logger.error(f"Failed to sync account {account.id} during mode switch: {e}", exc_info=True)
+                        sync_results[account.id] = {"error": str(e)}
+            finally:
+                real_db.close()
+            
+            # Refresh again after Kraken sync to show real data
+            try:
+                async def refresh_after_sync():
+                    # Wait a bit for sync to fully complete and commit
+                    await asyncio.sleep(1.0)  # Wait longer for sync to complete
+                    
+                    # Use real database session for refresh
+                    real_db = get_session_for_mode("real")
+                    try:
+                        for account_id in list(ws_manager.active_connections.keys()):
+                            try:
+                                # Use real database to get latest account data
+                                await _send_snapshot_optimized(real_db, account_id)
+                            except Exception as e:
+                                logger.warning(f"Failed to send post-sync refresh to account {account_id}: {e}")
+                    finally:
+                        real_db.close()
+                
+                ws_manager.schedule_task(refresh_after_sync())
+            except Exception as e:
+                logger.warning(f"Failed to broadcast post-sync refresh: {e}")
+        
+        return {
+            "message": f"Switched all accounts to {trade_mode} trading mode",
+            "accounts_updated": len(accounts),
+            "trade_mode": trade_mode
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to switch trade mode: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to switch trade mode: {str(e)}")
 
 
 @router.put("/{account_id}")
@@ -411,16 +587,30 @@ async def update_account_settings(account_id: int, payload: dict, db: Session = 
             auto_trading_enabled = _normalize_bool(payload.get("auto_trading_enabled"))
             account.auto_trading_enabled = "true" if auto_trading_enabled else "false"
             logger.info(f"Updated auto_trading_enabled to: {account.auto_trading_enabled}")
+
+        # Handle trade_mode change - sync from Kraken if switching to real mode
+        old_trade_mode = account.trade_mode
+        if "trade_mode" in payload:
+            new_trade_mode = payload.get("trade_mode")
+            if new_trade_mode in ["real", "paper"]:
+                account.trade_mode = new_trade_mode
+                logger.info(f"Updated trade_mode to: {account.trade_mode}")
+                
+                # If switching to real mode, sync data from Kraken
+                if new_trade_mode == "real" and old_trade_mode != "real":
+                    try:
+                        sync_results = sync_account_from_kraken(db, account)
+                        logger.info(f"Kraken sync results for account {account.name}: {sync_results}")
+                    except Exception as sync_err:
+                        logger.error(f"Failed to sync from Kraken during trade_mode switch: {sync_err}", exc_info=True)
         
         db.commit()
         db.refresh(account)
         logger.info(f"Account {account_id} updated successfully")
 
         # Reset auto trading job after account update (async in background to avoid blocking response)
-        import threading
         def reset_job_async():
             try:
-                from services.scheduler import reset_auto_trading_job
                 reset_auto_trading_job()
                 logger.info("Auto trading job reset successfully after account update")
             except Exception as e:
@@ -431,7 +621,6 @@ async def update_account_settings(account_id: int, payload: dict, db: Session = 
         reset_thread.start()
         logger.info("Auto trading job reset initiated in background")
 
-        from database.models import User
         user = db.query(User).filter(User.id == account.user_id).first()
         
         return {
@@ -505,8 +694,6 @@ async def get_asset_curve_by_timeframe(
             } for account in accounts]
         
         # Fetch kline data for all symbols (20 points)
-        from services.market_data import get_kline_data
-        
         symbol_klines = {}
         for symbol, market in unique_symbols:
             try:
@@ -616,9 +803,6 @@ async def get_asset_curve_by_timeframe(
 async def test_llm_connection(payload: dict):
     """Test LLM connection with provided credentials"""
     try:
-        import requests
-        import json
-        
         model = payload.get("model", "gpt-3.5-turbo")
         base_url = payload.get("base_url", "https://api.openai.com/v1")
         api_key = payload.get("api_key", "")
