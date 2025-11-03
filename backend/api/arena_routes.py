@@ -9,22 +9,19 @@ from math import sqrt
 from statistics import mean, pstdev
 from typing import Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import desc
-
 from database.connection import SessionLocal
-from database.models import (
-    Account,
-    Trade,
-    Position,
-    AIDecisionLog,
-    Order,
-    AccountStrategyConfig,
-)
+from database.models import (Account, AccountStrategyConfig, AIDecisionLog,
+                             Order, Position, Trade)
+from fastapi import APIRouter, Depends, Query
 from services.asset_calculator import calc_positions_value
-from services.price_cache import get_cached_price, cache_price
+from services.kraken_sync import (
+    get_kraken_balance_real_time,
+    get_kraken_positions_real_time
+)
 from services.market_data import get_last_price
+from services.price_cache import cache_price, get_cached_price
+from sqlalchemy import desc
+from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/arena", tags=["arena"])
 
@@ -105,14 +102,48 @@ def _compute_sharpe_ratio(returns: List[float]) -> Optional[float]:
 
 def _aggregate_account_stats(db: Session, account: Account) -> Dict[str, Optional[float]]:
     '''Aggregate trade and decision statistics for a given account.'''
-    initial_capital = float(account.initial_capital or 0)
-    current_cash = float(account.current_cash or 0)
-    positions_value = calc_positions_value(db, account.id)
+    # Get balance and positions from Kraken in real-time
+    try:
+        balance = get_kraken_balance_real_time(account)
+        positions_data = get_kraken_positions_real_time(account)
+        current_cash = float(balance) if balance is not None else 0.0
+        
+        # Calculate positions value
+        positions_value = 0.0
+        for pos in positions_data:
+            try:
+                price = _get_latest_price(pos["symbol"], "CRYPTO")
+                if price:
+                    positions_value += float(price) * float(pos["quantity"])
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[DEBUG] Failed to fetch Kraken data: {e}")
+        current_cash = 0.0
+        positions_value = 0.0
+    
+    # Initial capital is not tracked - use current cash as baseline
+    initial_capital = current_cash  # For return calculation, use current balance as baseline
+    
     total_assets = positions_value + current_cash
     total_pnl = total_assets - initial_capital
+    
+    print(f"[DEBUG] [TOTAL_RETURN] _aggregate_account_stats for account {account.id} ({account.name}):")
+    print(f"[DEBUG] [TOTAL_RETURN]   - initial_capital: ${initial_capital:.2f}")
+    print(f"[DEBUG] [TOTAL_RETURN]   - current_cash: ${current_cash:.2f}")
+    print(f"[DEBUG] [TOTAL_RETURN]   - positions_value: ${positions_value:.2f}")
+    print(f"[DEBUG] [TOTAL_RETURN]   - total_assets: ${total_assets:.2f} (positions + cash)")
+    print(f"[DEBUG] [TOTAL_RETURN]   - total_pnl: ${total_pnl:.2f} (total_assets - initial_capital)")
+    print(f"[DEBUG] [TOTAL_RETURN]   - db_url: {db.bind.url if hasattr(db, 'bind') else 'N/A'}")
+    
     total_return_pct = (
         (total_assets - initial_capital) / initial_capital if initial_capital else None
     )
+    
+    if total_return_pct is not None:
+        print(f"[DEBUG] [TOTAL_RETURN]   - total_return_pct: {total_return_pct*100:.2f}% = (${total_assets:.2f} - ${initial_capital:.2f}) / ${initial_capital:.2f}")
+    else:
+        print(f"[DEBUG] [TOTAL_RETURN]   - total_return_pct: None (initial_capital is 0)")
 
     trades: List[Trade] = (
         db.query(Trade)
@@ -204,40 +235,53 @@ def get_completed_trades(
     account_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
-    """Return recent trades across all AI accounts."""
-    query = (
-        db.query(Trade, Account)
-        .join(Account, Trade.account_id == Account.id)
-        .order_by(desc(Trade.trade_time))
-    )
-
+    """Return recent trades across all AI accounts.
+    Trades are stored in metadata database (completed trades are logged).
+    """
+    # Get account metadata from metadata database
     if account_id:
-        query = query.filter(Trade.account_id == account_id)
-
-    trade_rows = query.limit(limit).all()
-
-    if not trade_rows:
+        accounts = db.query(Account).filter(Account.id == account_id, Account.is_active == "true").all()
+    else:
+        accounts = db.query(Account).filter(Account.is_active == "true").all()
+    
+    if not accounts:
         return {
             "generated_at": datetime.utcnow().isoformat(),
             "accounts": [],
             "trades": [],
         }
-
-    trades: List[dict] = []
+    
+    account_ids = [acc.id for acc in accounts]
+    all_trades: List[dict] = []
     accounts_meta = {}
-
-    for trade, account in trade_rows:
+    
+    # Query trades from metadata database
+    query = (
+        db.query(Trade)
+        .filter(Trade.account_id.in_(account_ids))
+        .order_by(desc(Trade.trade_time))
+        .limit(limit * 2)  # Get more, will limit later
+    )
+    
+    trade_rows = query.all()
+    
+    for trade in trade_rows:
+        # Get account info from metadata DB
+        account = next((acc for acc in accounts if acc.id == trade.account_id), None)
+        if not account:
+            continue
+                    
         quantity = float(trade.quantity)
         price = float(trade.price)
         notional = price * quantity
-
+        
         order_no = None
         if trade.order_id:
             order = db.query(Order).filter(Order.id == trade.order_id).first()
             if order:
                 order_no = order.order_no
-
-        trades.append(
+        
+        all_trades.append(
             {
                 "trade_id": trade.id,
                 "order_id": trade.order_id,
@@ -252,17 +296,22 @@ def get_completed_trades(
                 "price": price,
                 "quantity": quantity,
                 "notional": notional,
-                "commission": float(trade.commission),
+                "commission": float(trade.commission or 0),
                 "trade_time": trade.trade_time.isoformat() if trade.trade_time else None,
             }
         )
-
-        accounts_meta[account.id] = {
-            "account_id": account.id,
-            "name": account.name,
-            "model": account.model,
-        }
-
+        
+        if account.id not in accounts_meta:
+            accounts_meta[account.id] = {
+                "account_id": account.id,
+                "name": account.name,
+                "model": account.model,
+            }
+    
+    # Sort all trades by time and limit
+    all_trades.sort(key=lambda x: x["trade_time"] if x["trade_time"] else "", reverse=True)
+    trades = all_trades[:limit]
+    
     return {
         "generated_at": datetime.utcnow().isoformat(),
         "accounts": list(accounts_meta.values()),
@@ -276,18 +325,45 @@ def get_model_chat(
     account_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
-    """Return recent AI decision logs as chat-style summaries."""
-    query = (
-        db.query(AIDecisionLog, Account)
-        .join(Account, AIDecisionLog.account_id == Account.id)
-        .order_by(desc(AIDecisionLog.decision_time))
-    )
-
+    """Return recent AI decision logs as chat-style summaries.
+    Decision logs are stored in metadata database.
+    """
+    # Get account metadata from metadata database
     if account_id:
-        query = query.filter(AIDecisionLog.account_id == account_id)
-
-    decision_rows = query.limit(limit).all()
-
+        accounts = db.query(Account).filter(Account.id == account_id, Account.is_active == "true").all()
+    else:
+        accounts = db.query(Account).filter(Account.is_active == "true").all()
+    
+    if not accounts:
+        return {
+            "generated_at": datetime.utcnow().isoformat(),
+            "entries": [],
+        }
+    
+    account_ids_list = [acc.id for acc in accounts]
+    all_decision_rows: List[Tuple[AIDecisionLog, Account]] = []
+    
+    # Query decisions from metadata database
+    query = (
+        db.query(AIDecisionLog)
+        .filter(AIDecisionLog.account_id.in_(account_ids_list))
+        .order_by(desc(AIDecisionLog.decision_time))
+        .limit(limit * 2)  # Get more, will limit later
+    )
+    
+    decision_logs = query.all()
+    
+    # Create account map for joining
+    account_map = {acc.id: acc for acc in accounts}
+    for log in decision_logs:
+        account = account_map.get(log.account_id)
+        if account:
+            all_decision_rows.append((log, account))
+    
+    # Sort and limit
+    all_decision_rows.sort(key=lambda x: x[0].decision_time if x[0].decision_time else datetime.min, reverse=True)
+    decision_rows = all_decision_rows[:limit]
+    
     if not decision_rows:
         return {
             "generated_at": datetime.utcnow().isoformat(),
@@ -296,6 +372,7 @@ def get_model_chat(
 
     entries: List[dict] = []
 
+    # Get strategy configs from metadata database
     account_ids = {account.id for _, account in decision_rows}
     strategy_map = {
         cfg.account_id: cfg
@@ -331,29 +408,29 @@ def get_model_chat(
 
         entries.append(
             {
-                "id": log.id,
-                "account_id": account.id,
-                "account_name": account.name,
-                "model": account.model,
-                "operation": log.operation,
-                "symbol": log.symbol,
-                "reason": log.reason,
-                "executed": log.executed == "true",
-                "prev_portion": float(log.prev_portion or 0),
-                "target_portion": float(log.target_portion or 0),
-                "total_balance": float(log.total_balance or 0),
-                "order_id": log.order_id,
-                "decision_time": log.decision_time.isoformat()
-                if log.decision_time
-                else None,
-                "trigger_mode": trigger_mode,
-                "strategy_enabled": strategy_enabled,
-                "last_trigger_at": last_trigger_iso,
-                "trigger_latency_seconds": trigger_latency,
-                "prompt_snapshot": log.prompt_snapshot,
-                "reasoning_snapshot": log.reasoning_snapshot,
-                "decision_snapshot": log.decision_snapshot,
-            }
+                    "id": log.id,
+                    "account_id": account.id,
+                    "account_name": account.name,
+                    "model": account.model,
+                    "operation": log.operation,
+                    "symbol": log.symbol,
+                    "reason": log.reason,
+                    "executed": log.executed == "true",
+                    "prev_portion": float(log.prev_portion or 0),
+                    "target_portion": float(log.target_portion or 0),
+                    "total_balance": float(log.total_balance or 0),
+                    "order_id": log.order_id,
+                    "decision_time": log.decision_time.isoformat()
+                    if log.decision_time
+                    else None,
+                    "trigger_mode": trigger_mode,
+                    "strategy_enabled": strategy_enabled,
+                    "last_trigger_at": last_trigger_iso,
+                    "trigger_latency_seconds": trigger_latency,
+                    "prompt_snapshot": log.prompt_snapshot,
+                    "reasoning_snapshot": log.reasoning_snapshot,
+                    "decision_snapshot": log.decision_snapshot,
+                }
         )
 
     return {
@@ -367,7 +444,10 @@ def get_positions_snapshot(
     account_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
-    """Return consolidated positions and cash for active AI accounts."""
+    """Return consolidated positions and cash for active AI accounts.
+    Positions and cash are fetched from Kraken in real-time.
+    """
+    # Get account metadata from metadata database
     accounts_query = db.query(Account).filter(
         Account.account_type == "AI",
         Account.is_active == "true",
@@ -381,22 +461,25 @@ def get_positions_snapshot(
     snapshots: List[dict] = []
 
     for account in accounts:
-        positions = (
-            db.query(Position)
-            .filter(Position.account_id == account.id, Position.quantity > 0)
-            .order_by(Position.symbol.asc())
-            .all()
-        )
+        # Get positions from Kraken in real-time
+        try:
+            balance = get_kraken_balance_real_time(account)
+            positions_data = get_kraken_positions_real_time(account)
+            current_cash = float(balance) if balance is not None else 0.0
+        except Exception as e:
+            print(f"[DEBUG] Failed to fetch Kraken data for account {account.id}: {e}")
+            current_cash = 0.0
+            positions_data = []
 
         position_items: List[dict] = []
         total_unrealized = 0.0
 
-        for pos in positions:
-            quantity = float(pos.quantity)
-            avg_cost = float(pos.avg_cost)
+        for pos in positions_data:
+            quantity = float(pos["quantity"])
+            avg_cost = float(pos["avg_cost"])
             base_notional = quantity * avg_cost
 
-            last_price = _get_latest_price(pos.symbol, pos.market)
+            last_price = _get_latest_price(pos["symbol"], "CRYPTO")
             if last_price is None:
                 last_price = avg_cost
 
@@ -406,10 +489,10 @@ def get_positions_snapshot(
 
             position_items.append(
                 {
-                    "id": pos.id,
-                    "symbol": pos.symbol,
-                    "name": pos.name,
-                    "market": pos.market,
+                    "id": pos.get("id", 0),
+                    "symbol": pos["symbol"],
+                    "name": pos["symbol"],  # Use symbol as name
+                    "market": "CRYPTO",
                     "side": "LONG" if quantity >= 0 else "SHORT",
                     "quantity": quantity,
                     "avg_cost": avg_cost,
@@ -420,15 +503,17 @@ def get_positions_snapshot(
                 }
             )
 
-        total_assets = (
-            calc_positions_value(db, account.id) + float(account.current_cash or 0)
-        )
+        total_assets = sum(p["current_value"] for p in position_items) + current_cash
+        
+        # For return calculation, use current cash as baseline (initial capital not tracked)
+        initial_capital_for_calc = current_cash
+        
         total_return = None
-        if account.initial_capital:
+        if initial_capital_for_calc > 0:
             try:
                 total_return = (
-                    (total_assets - float(account.initial_capital))
-                    / float(account.initial_capital)
+                    (total_assets - initial_capital_for_calc)
+                    / initial_capital_for_calc
                 )
             except ZeroDivisionError:
                 total_return = None
@@ -439,10 +524,10 @@ def get_positions_snapshot(
                 "account_name": account.name,
                 "model": account.model,
                 "total_unrealized_pnl": total_unrealized,
-                "available_cash": float(account.current_cash or 0),
+                "available_cash": current_cash,
                 "positions": position_items,
                 "total_assets": total_assets,
-                "initial_capital": float(account.initial_capital or 0),
+                "initial_capital": initial_capital_for_calc,
                 "total_return": total_return,
             }
         )
@@ -459,7 +544,10 @@ def get_aggregated_analytics(
     account_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
-    '''Return leaderboard-style analytics for AI accounts.'''
+    '''Return leaderboard-style analytics for AI accounts.
+    Data fetched from Kraken in real-time.
+    '''
+    # Get account metadata from metadata database
     accounts_query = db.query(Account).filter(
         Account.account_type == "AI",
     )
@@ -491,6 +579,7 @@ def get_aggregated_analytics(
     sharpe_values = []
 
     for account in accounts:
+        # Stats are calculated from Kraken real-time data
         stats = _aggregate_account_stats(db, account)
         analytics.append(stats)
         total_assets_all += stats.get("total_assets") or 0.0
@@ -507,9 +596,20 @@ def get_aggregated_analytics(
 
     average_sharpe = mean(sharpe_values) if sharpe_values else None
     total_pnl_all = total_assets_all - total_initial
+    
+    print(f"[DEBUG] [TOTAL_RETURN] get_aggregated_analytics summary:")
+    print(f"[DEBUG] [TOTAL_RETURN]   - total_assets_all: ${total_assets_all:.2f}")
+    print(f"[DEBUG] [TOTAL_RETURN]   - total_initial: ${total_initial:.2f}")
+    print(f"[DEBUG] [TOTAL_RETURN]   - total_pnl_all: ${total_pnl_all:.2f}")
+    
     total_return_pct = (
         total_pnl_all / total_initial if total_initial else None
     )
+    
+    if total_return_pct is not None:
+        print(f"[DEBUG] [TOTAL_RETURN]   - total_return_pct: {total_return_pct*100:.2f}% = ${total_pnl_all:.2f} / ${total_initial:.2f}")
+    else:
+        print(f"[DEBUG] [TOTAL_RETURN]   - total_return_pct: None (total_initial is 0)")
 
     summary = {
         "total_assets": total_assets_all,

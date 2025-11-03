@@ -61,7 +61,7 @@ interface Order { id: number; order_no: string; symbol: string; name: string; ma
 interface Trade { id: number; order_id: number; account_id: number; symbol: string; name: string; market: string; side: string; price: number; quantity: number; commission: number; trade_time: string }
 
 const PAGE_TITLES: Record<string, string> = {
-  portfolio: 'Crypto Paper Trading',
+  portfolio: 'Crypto Trading',
   comprehensive: 'Hyper Alpha Arena',
   'system-logs': 'System Logs',
   'prompt-management': 'Prompt Templates',
@@ -95,19 +95,19 @@ function App() {
     let reconnectTimer: NodeJS.Timeout | null = null
     let ws = __WS_SINGLETON__
     const created = !ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED
-    
+
     const connectWebSocket = () => {
       try {
         ws = new WebSocket(resolveWsUrl())
         __WS_SINGLETON__ = ws
         wsRef.current = ws
-        
+
         const handleOpen = () => {
           console.log('WebSocket connected')
-          // Start with hardcoded default user for paper trading
+          // Start with default user
           ws!.send(JSON.stringify({ type: 'bootstrap', username: 'default', initial_capital: 10000 }))
         }
-        
+
         const handleMessage = (e: MessageEvent) => {
           try {
             const msg = JSON.parse(e.data)
@@ -163,12 +163,12 @@ function App() {
             console.error('Failed to parse WebSocket message:', err)
           }
         }
-        
+
         const handleClose = (event: CloseEvent) => {
           console.log('WebSocket closed:', event.code, event.reason)
           __WS_SINGLETON__ = null
           if (wsRef.current === ws) wsRef.current = null
-          
+
           // Attempt to reconnect after 3 seconds if the close wasn't intentional
           if (event.code !== 1000 && event.code !== 1001) {
             reconnectTimer = setTimeout(() => {
@@ -177,7 +177,7 @@ function App() {
             }, 3000)
           }
         }
-        
+
         const handleError = (event: Event) => {
           console.error('WebSocket error:', event)
           // Don't show toast for every error to avoid spam
@@ -188,7 +188,7 @@ function App() {
         ws.addEventListener('message', handleMessage)
         ws.addEventListener('close', handleClose)
         ws.addEventListener('error', handleError)
-        
+
         return () => {
           ws?.removeEventListener('open', handleOpen)
           ws?.removeEventListener('message', handleMessage)
@@ -201,7 +201,7 @@ function App() {
         reconnectTimer = setTimeout(connectWebSocket, 5000)
       }
     }
-    
+
     if (created) {
       connectWebSocket()
     } else {
@@ -291,7 +291,7 @@ function App() {
   const handleAccountUpdated = () => {
     // Increment refresh trigger to force AccountSelector to refresh
     setAccountRefreshTrigger(prev => prev + 1)
-    
+
     // Also refresh the current data snapshot
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'get_snapshot' }))
@@ -325,7 +325,7 @@ function App() {
             loadingAccounts={accountsLoading}
           />
         )}
-        
+
         {currentPage === 'comprehensive' && (
           <ComprehensiveView
             overview={overview}
@@ -370,13 +370,7 @@ function App() {
         onAccountUpdated={handleAccountUpdated}
       />
       <div className="flex-1 flex flex-col">
-        <Header
-          title={pageTitle}
-          currentUser={user}
-          currentAccount={account}
-          showAccountSelector={currentPage === 'portfolio' || currentPage === 'comprehensive'}
-          onUserChange={switchUser}
-        />
+        <Header title={pageTitle} />
         {renderMainContent()}
       </div>
     </div>

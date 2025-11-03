@@ -4,12 +4,13 @@ Background task for periodically processing pending orders
 """
 
 import asyncio
+import logging
 import threading
 import time
-import logging
 from typing import Optional
 
 from database.connection import SessionLocal
+
 from .order_matching import process_all_pending_orders
 
 logger = logging.getLogger(__name__)

@@ -9,11 +9,11 @@ import threading
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
+from database.models import Account, AccountAssetSnapshot
+from services.kraken_sync import get_kraken_balance_real_time
 from sqlalchemy import cast, func
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.types import Integer
-
-from database.models import Account, AccountAssetSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -134,10 +134,17 @@ def get_all_asset_curves_data_new(db: Session, timeframe: str = "1h") -> List[Di
             }
         )
 
-    # Ensure accounts without snapshots still appear with their initial capital
+    # Ensure accounts without snapshots still appear with their current balance from Kraken
     now_utc = datetime.now(timezone.utc)
     for account in accounts:
         if account.id not in seen_accounts:
+            # Get balance from Kraken in real-time
+            try:
+                balance = get_kraken_balance_real_time(account)
+                current_cash = float(balance) if balance is not None else 0.0
+            except Exception:
+                current_cash = 0.0
+            
             result.append(
                 {
                     "timestamp": int(now_utc.timestamp()),
@@ -145,8 +152,8 @@ def get_all_asset_curves_data_new(db: Session, timeframe: str = "1h") -> List[Di
                     "account_id": account.id,
                     "user_id": account.user_id,
                     "username": account.name,
-                    "total_assets": float(account.initial_capital),
-                    "cash": float(account.current_cash),
+                    "total_assets": current_cash,
+                    "cash": current_cash,
                     "positions_value": 0.0,
                 }
             )

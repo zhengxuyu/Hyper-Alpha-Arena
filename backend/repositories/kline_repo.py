@@ -3,11 +3,13 @@ K-line data repository module
 Provides K-line data database operations
 """
 
-from sqlalchemy.orm import Session
-from sqlalchemy import and_
+import time
 from typing import List, Optional
-from database.models import cryptoKline
+
 from database.connection import get_db
+from database.models import cryptoKline
+from sqlalchemy import and_
+from sqlalchemy.orm import Session
 
 
 class KlineRepository:
@@ -113,7 +115,6 @@ class KlineRepository:
             period: Time period
             keep_days: Days to keep
         """
-        import time
         cutoff_timestamp = int((time.time() - keep_days * 24 * 3600) * 1000)
         
         self.db.query(cryptoKline).filter(

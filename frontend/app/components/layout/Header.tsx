@@ -2,30 +2,11 @@ import { useEffect, useState } from 'react'
 import { Moon, Sun } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
-interface User {
-  id: number
-  username: string
-}
-
-interface Account {
-  id: number
-  user_id: number
-  name: string
-  account_type: string
-  initial_capital: number
-  current_cash: number
-  frozen_cash: number
-}
-
 interface HeaderProps {
   title?: string
-  currentUser?: User | null
-  currentAccount?: Account | null
-  showAccountSelector?: boolean
-  onUserChange?: (username: string) => void
 }
 
-export default function Header({ title = 'Hyper Alpha Arena', currentUser, currentAccount, showAccountSelector = false, onUserChange }: HeaderProps) {
+export default function Header({ title = 'Hyper Alpha Arena' }: HeaderProps) {
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     if (typeof document === 'undefined') return 'dark'
     return document.documentElement.classList.contains('dark') ? 'dark' : 'light'
@@ -65,7 +46,7 @@ export default function Header({ title = 'Hyper Alpha Arena', currentUser, curre
           <img src="/static/logo_app.png" alt="Logo" className="h-8 w-8 object-contain" />
           <h1 className="text-xl font-bold">{title}</h1>
         </div>
-        
+
         <div className="flex items-center gap-4">
           <Button
             variant="ghost"

@@ -6,16 +6,17 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List
 
-from sqlalchemy.orm import Session
-
+# Dynamic import to avoid circular dependency with api.ws
+# Note: api.ws imports scheduler, scheduler may import services that import asset_snapshot_service
 from database.connection import SessionLocal
 from database.models import Account, AccountAssetSnapshot, Position
 from services.asset_curve_calculator import invalidate_asset_curve_cache
+from services.kraken_sync import get_kraken_balance_real_time
 from services.market_data import get_last_price
-from api.ws import broadcast_arena_asset_update, manager
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,13 @@ def handle_price_update(event: Dict[str, Any]) -> None:
                     positions_value += current_value
                     symbol_totals[symbol_key] += current_value
 
-                available_cash = float(account.current_cash or 0.0)
-                frozen_cash = float(account.frozen_cash or 0.0)
+                # Get balance from Kraken in real-time
+                try:
+                    balance = get_kraken_balance_real_time(account)
+                    available_cash = float(balance) if balance is not None else 0.0
+                except Exception:
+                    available_cash = 0.0
+                frozen_cash = 0.0  # Not tracked - all data from Kraken
                 total_assets = positions_value + available_cash
 
                 total_available_cash += available_cash
@@ -125,24 +131,31 @@ def handle_price_update(event: Dict[str, Any]) -> None:
             session.commit()
             invalidate_asset_curve_cache()
 
-        if manager.has_connections():
-            update_payload = {
-                "generated_at": event_time.isoformat(),
-                "totals": {
-                    "available_cash": round(total_available_cash, 2),
-                    "frozen_cash": round(total_frozen_cash, 2),
-                    "positions_value": round(total_positions_value, 2),
-                    "total_assets": round(
-                        total_available_cash + total_frozen_cash + total_positions_value, 2
-                    ),
-                },
-                "symbols": {symbol: round(value, 2) for symbol, value in symbol_totals.items()},
-                "accounts": accounts_payload,
-            }
-            try:
-                manager.schedule_task(broadcast_arena_asset_update(update_payload))
-            except Exception as broadcast_err:
-                logger.debug("Failed to schedule arena asset broadcast: %s", broadcast_err)
+        # Use dynamic import to avoid circular dependency with api.ws
+        try:
+            from api.ws import broadcast_arena_asset_update, manager
+            
+            if manager.has_connections():
+                update_payload = {
+                    "generated_at": event_time.isoformat(),
+                    "totals": {
+                        "available_cash": round(total_available_cash, 2),
+                        "frozen_cash": round(total_frozen_cash, 2),
+                        "positions_value": round(total_positions_value, 2),
+                        "total_assets": round(
+                            total_available_cash + total_frozen_cash + total_positions_value, 2
+                        ),
+                    },
+                    "symbols": {symbol: round(value, 2) for symbol, value in symbol_totals.items()},
+                    "accounts": accounts_payload,
+                }
+                try:
+                    manager.schedule_task(broadcast_arena_asset_update(update_payload))
+                except Exception as broadcast_err:
+                    logger.debug("Failed to schedule arena asset broadcast: %s", broadcast_err)
+        except ImportError:
+            # If api.ws is not available, skip broadcast
+            pass
 
         _purge_old_snapshots(session, cutoff_hours=SNAPSHOT_RETENTION_HOURS)
     except Exception as err:

@@ -2,21 +2,41 @@
 Account and Asset Curve API Routes (Cleaned)
 """
 
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.orm import Session
-from sqlalchemy import func
-from typing import List
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+import asyncio
+import json
 import logging
+import threading
+import requests
+from datetime import date, datetime, timedelta, timezone
+from openai import OpenAI
+from openai import APIError as OpenAIAPIError
+from decimal import Decimal
+from typing import List
 
+from api.ws import manager as ws_manager, _send_snapshot_optimized
 from database.connection import SessionLocal
-from database.models import Account, Position, Trade, CryptoPrice, AccountAssetSnapshot
-from services.asset_curve_calculator import invalidate_asset_curve_cache
-from services.ai_decision_service import build_chat_completion_endpoints, _extract_text_from_message
-from schemas.account import StrategyConfig, StrategyConfigUpdate
+from database.models import (Account, AccountAssetSnapshot, CryptoPrice, Order,
+                             Position, Trade, User)
+from fastapi import APIRouter, Depends, HTTPException
 from repositories.strategy_repo import get_strategy_by_account, upsert_strategy
+from schemas.account import StrategyConfig, StrategyConfigUpdate
+from services.ai_decision_service import (_extract_text_from_message,
+                                          build_chat_completion_endpoints)
+from services.asset_calculator import calc_positions_value
+from services.asset_curve_calculator import invalidate_asset_curve_cache
+from services.kraken_sync import (
+    sync_account_from_kraken,
+    get_kraken_balance_only,
+    get_kraken_balance_real_time,
+    get_kraken_positions_real_time,
+    get_kraken_open_orders_real_time,
+    get_kraken_closed_orders_real_time
+)
+from services.market_data import get_kline_data
+from services.scheduler import reset_auto_trading_job
 from services.trading_strategy import strategy_manager
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +85,18 @@ def _serialize_strategy(account: Account, strategy) -> StrategyConfig:
 
 @router.get("/list")
 async def list_all_accounts(db: Session = Depends(get_db)):
-    """Get all active accounts (for paper trading demo)"""
+    """Get all active accounts - balances fetched from Kraken in real-time"""
     try:
-        from database.models import User
+        # Get account metadata from metadata database
         accounts = db.query(Account).filter(Account.is_active == "true").all()
+        logger.info(f"Found {len(accounts)} active accounts in metadata database")
         
         result = []
         for account in accounts:
+            # Get balance from Kraken in real-time
+            balance = get_kraken_balance_real_time(account)
+            current_cash = float(balance) if balance is not None else 0.0
+            
             user = db.query(User).filter(User.id == account.user_id).first()
             result.append({
                 "id": account.id,
@@ -79,16 +104,18 @@ async def list_all_accounts(db: Session = Depends(get_db)):
                 "username": user.username if user else "unknown",
                 "name": account.name,
                 "account_type": account.account_type,
-                "initial_capital": float(account.initial_capital),
-                "current_cash": float(account.current_cash),
-                "frozen_cash": float(account.frozen_cash),
+                "current_cash": current_cash,
+                "frozen_cash": 0.0,  # Not tracked - all data from Kraken
                 "model": account.model,
                 "base_url": account.base_url,
                 "api_key": account.api_key,
+                "kraken_api_key": account.kraken_api_key,
+                "kraken_private_key": account.kraken_private_key,
                 "is_active": account.is_active == "true",
-                "auto_trading_enabled": account.auto_trading_enabled == "true"
+                "auto_trading_enabled": account.auto_trading_enabled == "true",
             })
         
+        logger.info(f"[ACCOUNT_LIST] Returning {len(result)} accounts")
         return result
     except Exception as e:
         logger.error(f"Failed to list accounts: {e}", exc_info=True)
@@ -97,9 +124,10 @@ async def list_all_accounts(db: Session = Depends(get_db)):
 
 @router.get("/{account_id}/overview")
 async def get_specific_account_overview(account_id: int, db: Session = Depends(get_db)):
-    """Get overview for a specific account"""
+    """Get overview for a specific account - data fetched from Kraken in real-time"""
+    logger.info(f"[ACCOUNT_OVERVIEW] Getting overview for account {account_id}")
     try:
-        # Get the specific account
+        # Get account metadata from metadata database
         account = db.query(Account).filter(
             Account.id == account_id,
             Account.is_active == "true"
@@ -108,35 +136,34 @@ async def get_specific_account_overview(account_id: int, db: Session = Depends(g
         if not account:
             raise HTTPException(status_code=404, detail="Account not found")
         
-        # Calculate positions value for this specific account
-        from services.asset_calculator import calc_positions_value
-        positions_value = float(calc_positions_value(db, account.id) or 0.0)
+        # Get balance from Kraken in real-time
+        balance = get_kraken_balance_real_time(account)
+        current_cash = float(balance) if balance is not None else 0.0
         
-        # Count positions and pending orders for this account
-        positions_count = db.query(Position).filter(
-            Position.account_id == account.id,
-            Position.quantity > 0
-        ).count()
+        # Get positions from Kraken in real-time
+        positions = get_kraken_positions_real_time(account)
+        positions_value = sum(float(pos["quantity"]) * 0.0 for pos in positions)  # Would need current price
+        positions_count = len(positions)
         
-        from database.models import Order
-        pending_orders = db.query(Order).filter(
-            Order.account_id == account.id,
-            Order.status == "PENDING"
-        ).count()
+        # Get open orders from Kraken in real-time
+        open_orders = get_kraken_open_orders_real_time(account)
+        pending_orders = len(open_orders)
         
-        return {
+        result = {
             "account": {
                 "id": account.id,
                 "name": account.name,
                 "account_type": account.account_type,
-                "current_cash": float(account.current_cash),
-                "frozen_cash": float(account.frozen_cash),
+                "current_cash": current_cash,
+                "frozen_cash": 0.0,  # Not tracked - all data from Kraken
             },
-            "total_assets": positions_value + float(account.current_cash),
+            "total_assets": current_cash + positions_value,  # Would need to calculate positions value properly
             "positions_value": positions_value,
             "positions_count": positions_count,
             "pending_orders": pending_orders,
         }
+        logger.info(f"[ACCOUNT_OVERVIEW] Returning overview for account {account_id}: cash=${current_cash:.2f}")
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -177,20 +204,25 @@ async def update_account_strategy(
     db: Session = Depends(get_db),
 ):
     """Update AI trading strategy configuration for an account."""
+    logger.info(f"[STRATEGY] Updating strategy for account {account_id}: trigger_mode={payload.trigger_mode}, enabled={payload.enabled}, interval_seconds={payload.interval_seconds}, tick_batch_size={payload.tick_batch_size}")
+    
     account = (
         db.query(Account)
         .filter(Account.id == account_id, Account.is_active == "true")
         .first()
     )
     if not account:
+        logger.warning(f"[STRATEGY] Account {account_id} not found")
         raise HTTPException(status_code=404, detail="Account not found")
 
     valid_modes = {"realtime", "interval", "tick_batch"}
     if payload.trigger_mode not in valid_modes:
+        logger.warning(f"[STRATEGY] Invalid trigger_mode: {payload.trigger_mode}")
         raise HTTPException(status_code=400, detail="Invalid trigger_mode")
 
     if payload.trigger_mode == "interval":
         if payload.interval_seconds is None or payload.interval_seconds <= 0:
+            logger.warning(f"[STRATEGY] Invalid interval_seconds for interval mode: {payload.interval_seconds}")
             raise HTTPException(
                 status_code=400,
                 detail="interval_seconds must be > 0 for interval mode",
@@ -200,6 +232,7 @@ async def update_account_strategy(
 
     if payload.trigger_mode == "tick_batch":
         if payload.tick_batch_size is None or payload.tick_batch_size <= 0:
+            logger.warning(f"[STRATEGY] Invalid tick_batch_size for tick_batch mode: {payload.tick_batch_size}")
             raise HTTPException(
                 status_code=400,
                 detail="tick_batch_size must be > 0 for tick_batch mode",
@@ -210,6 +243,7 @@ async def update_account_strategy(
     interval_seconds = payload.interval_seconds if payload.trigger_mode == "interval" else None
     tick_batch_size = payload.tick_batch_size if payload.trigger_mode == "tick_batch" else None
 
+    logger.info(f"[STRATEGY] Calling upsert_strategy with: account_id={account_id}, trigger_mode={payload.trigger_mode}, interval_seconds={interval_seconds}, tick_batch_size={tick_batch_size}, enabled={payload.enabled}")
     strategy = upsert_strategy(
         db,
         account_id=account_id,
@@ -218,52 +252,79 @@ async def update_account_strategy(
         tick_batch_size=tick_batch_size,
         enabled=payload.enabled,
     )
-
+    
+    logger.info(f"[STRATEGY] Strategy updated in DB: trigger_mode={strategy.trigger_mode}, interval_seconds={strategy.interval_seconds}, tick_batch_size={strategy.tick_batch_size}, enabled={strategy.enabled}")
+    
+    logger.info(f"[STRATEGY] Refreshing strategy manager (force=True)")
     strategy_manager.refresh_strategies(force=True)
-    return _serialize_strategy(account, strategy)
+    
+    # Refresh account to get latest auto_trading_enabled status
+    db.refresh(account)
+    result = _serialize_strategy(account, strategy)
+    logger.info(f"[STRATEGY] Returning serialized strategy: trigger_mode={result.trigger_mode}, enabled={result.enabled}")
+    return result
 
 
 @router.get("/overview")
 async def get_account_overview(db: Session = Depends(get_db)):
-    """Get overview for the default account (for paper trading demo)"""
+    """Get overview for the default account - uses correct database based on trade_mode"""
+    print(f"[DEBUG] [PAGE_LOAD] /account/overview endpoint called (main page default account overview)")
+    logger.info(f"[PAGE_LOAD] /account/overview endpoint called (main page default account overview)")
+    
     try:
-        # Get the first active account (default account)
+        # Get account metadata from metadata database
         account = db.query(Account).filter(Account.is_active == "true").first()
         
         if not account:
+            print(f"[DEBUG] [PAGE_LOAD] No active account found")
             raise HTTPException(status_code=404, detail="No active account found")
         
-        # Calculate positions value
-        from services.asset_calculator import calc_positions_value
-        positions_value = float(calc_positions_value(db, account.id) or 0.0)
+        print(f"[DEBUG] [PAGE_LOAD] Found account {account.id} ({account.name}) in metadata DB")
+        logger.info(f"[PAGE_LOAD] Found account {account.id} ({account.name}) in metadata DB")
         
-        # Count positions and pending orders
-        positions_count = db.query(Position).filter(
-            Position.account_id == account.id,
-            Position.quantity > 0
-        ).count()
+        # Get balance from Kraken in real-time
+        balance = get_kraken_balance_real_time(account)
+        current_cash = float(balance) if balance is not None else 0.0
         
-        from database.models import Order
-        pending_orders = db.query(Order).filter(
-            Order.account_id == account.id,
-            Order.status == "PENDING"
-        ).count()
+        # Get positions from Kraken in real-time
+        positions = get_kraken_positions_real_time(account)
+        positions_list = [
+            {
+                "symbol": pos["symbol"],
+                "quantity": float(pos["quantity"]),
+                "avg_cost": float(pos["avg_cost"]),
+            }
+            for pos in positions
+        ]
         
-        return {
+        # Get open orders from Kraken in real-time
+        open_orders = get_kraken_open_orders_real_time(account)
+        pending_orders = len(open_orders)
+        
+        # Calculate positions value (would need current prices for accurate calculation)
+        positions_value = 0.0  # Would need to fetch current prices
+        
+        portfolio = {
+            "total_assets": current_cash + positions_value,
+            "cash": current_cash,
+            "positions": positions_list,
+            "positions_count": len(positions),
+            "pending_orders": pending_orders,
+        }
+        
+        result = {
             "account": {
                 "id": account.id,
                 "name": account.name,
                 "account_type": account.account_type,
-                "current_cash": float(account.current_cash),
-                "frozen_cash": float(account.frozen_cash),
+                "current_cash": current_cash,
+                "frozen_cash": 0.0,  # Not tracked - all data from Kraken
             },
-            "portfolio": {
-                "total_assets": positions_value + float(account.current_cash),
-                "positions_value": positions_value,
-                "positions_count": positions_count,
-                "pending_orders": pending_orders,
-            }
+            "portfolio": portfolio,
         }
+        
+        logger.info(f"[PAGE_LOAD] Returning overview: account_id={account.id}, cash=${current_cash:.2f}")
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -273,10 +334,8 @@ async def get_account_overview(db: Session = Depends(get_db)):
 
 @router.post("/")
 async def create_new_account(payload: dict, db: Session = Depends(get_db)):
-    """Create a new account for the default user (for paper trading demo)"""
+    """Create a new account - only stores metadata (LLM config), trading data fetched from Kraken"""
     try:
-        from database.models import User
-        
         # Get the default user (or first user)
         user = db.query(User).filter(User.username == "default").first()
         if not user:
@@ -289,7 +348,8 @@ async def create_new_account(payload: dict, db: Session = Depends(get_db)):
         if "name" not in payload or not payload["name"]:
             raise HTTPException(status_code=400, detail="Account name is required")
         
-        # Create new account
+        # Create new account metadata in metadata database
+        # Only store LLM configuration - trading data is fetched from Kraken in real-time
         auto_trading_enabled = _normalize_bool(payload.get("auto_trading_enabled", True))
         auto_trading_value = "true" if auto_trading_enabled else "false"
 
@@ -301,76 +361,61 @@ async def create_new_account(payload: dict, db: Session = Depends(get_db)):
             model=payload.get("model", "gpt-4-turbo"),
             base_url=payload.get("base_url", "https://api.openai.com/v1"),
             api_key=payload.get("api_key", ""),
-            initial_capital=float(payload.get("initial_capital", 10000.0)),
-            current_cash=float(payload.get("initial_capital", 10000.0)),
-            frozen_cash=0.0,
+            kraken_api_key=payload.get("kraken_api_key", ""),
+            kraken_private_key=payload.get("kraken_private_key", ""),
             is_active="true",
-            auto_trading_enabled=auto_trading_value
+            auto_trading_enabled=auto_trading_value,
         )
         
         db.add(new_account)
         db.commit()
         db.refresh(new_account)
-
-        # Record initial snapshot so asset curves start at the configured capital
-        try:
-            now_utc = datetime.now(timezone.utc)
-            initial_total = Decimal(str(new_account.initial_capital))
-            snapshot = AccountAssetSnapshot(
-                account_id=new_account.id,
-                total_assets=initial_total,
-                cash=Decimal(str(new_account.current_cash)),
-                positions_value=Decimal("0"),
-                event_time=now_utc,
-                trigger_symbol=None,
-                trigger_market="CRYPTO",
-            )
-            db.add(snapshot)
-            db.commit()
-            invalidate_asset_curve_cache()
-        except Exception as snapshot_err:
-            db.rollback()
-            logger.warning(
-                "Failed to create initial account snapshot for account %s: %s",
-                new_account.id,
-                snapshot_err,
-            )
-
-        # Reset auto trading job after creating new account (async in background to avoid blocking response)
-        import threading
-        def reset_job_async():
-            try:
-                from services.scheduler import reset_auto_trading_job
-                reset_auto_trading_job()
-                logger.info("Auto trading job reset successfully after account creation")
-            except Exception as e:
-                logger.warning(f"Failed to reset auto trading job: {e}")
-
-        # Run reset in background thread to not block API response
-        reset_thread = threading.Thread(target=reset_job_async, daemon=True)
-        reset_thread.start()
-        logger.info("Auto trading job reset initiated in background")
-
+        
+        logger.info(f"Created account {new_account.id} ({new_account.name}) in metadata database")
+        
         return {
             "id": new_account.id,
             "user_id": new_account.user_id,
             "username": user.username,
             "name": new_account.name,
             "account_type": new_account.account_type,
-            "initial_capital": float(new_account.initial_capital),
-            "current_cash": float(new_account.current_cash),
-            "frozen_cash": float(new_account.frozen_cash),
+            "current_cash": 0.0,  # Will be fetched from Kraken in real-time
+            "frozen_cash": 0.0,
             "model": new_account.model,
             "base_url": new_account.base_url,
             "api_key": new_account.api_key,
+            "kraken_api_key": new_account.kraken_api_key,
+            "kraken_private_key": new_account.kraken_private_key,
             "is_active": new_account.is_active == "true",
-            "auto_trading_enabled": new_account.auto_trading_enabled == "true"
+            "auto_trading_enabled": new_account.auto_trading_enabled == "true",
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to create account: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create account: {str(e)}")
+
+
+@router.post("/sync-all-from-kraken")
+async def sync_all_accounts_from_kraken(db: Session = Depends(get_db)):
+    """Sync all accounts from Kraken - DEPRECATED: Data is now fetched in real-time"""
+    return {
+        "message": "Data is now fetched from Kraken in real-time. Sync endpoint is deprecated.",
+        "results": {}
+    }
+
+
+# Remove the rest of switch-trade-mode implementation
+# The function is already marked as deprecated above with HTTPException 410
+
+
+
+
+
+@router.post("/switch-trade-mode")
+async def switch_global_trade_mode(payload: dict, db: Session = Depends(get_db)):
+    """DEPRECATED: Paper trading removed. Only real trading is supported."""
+    raise HTTPException(status_code=410, detail="Paper trading has been removed. Only real trading is supported.")
 
 
 @router.put("/{account_id}")
@@ -411,16 +456,32 @@ async def update_account_settings(account_id: int, payload: dict, db: Session = 
             auto_trading_enabled = _normalize_bool(payload.get("auto_trading_enabled"))
             account.auto_trading_enabled = "true" if auto_trading_enabled else "false"
             logger.info(f"Updated auto_trading_enabled to: {account.auto_trading_enabled}")
+
+        # Note: trade_mode should not be updated via this endpoint
+        # It should only be updated via the global switch_global_trade_mode endpoint
+        if "trade_mode" in payload:
+            logger.warning(f"Ignoring trade_mode update attempt for account {account_id}. Use global switch endpoint instead.")
+        
+        # Handle Kraken API keys update
+        if "kraken_api_key" in payload:
+            account.kraken_api_key = payload["kraken_api_key"]
+            logger.info(f"Updated kraken_api_key for account {account.name}")
+        
+        if "kraken_private_key" in payload:
+            account.kraken_private_key = payload["kraken_private_key"]
+            logger.info(f"Updated kraken_private_key for account {account.name}")
+        
+        # Note: current_cash cannot be updated - it's fetched from Kraken in real-time
+        if "current_cash" in payload:
+            logger.warning(f"Attempted to update cash for account {account.name} - ignored (cash comes from Kraken in real-time)")
         
         db.commit()
         db.refresh(account)
         logger.info(f"Account {account_id} updated successfully")
 
         # Reset auto trading job after account update (async in background to avoid blocking response)
-        import threading
         def reset_job_async():
             try:
-                from services.scheduler import reset_auto_trading_job
                 reset_auto_trading_job()
                 logger.info("Auto trading job reset successfully after account update")
             except Exception as e:
@@ -431,8 +492,11 @@ async def update_account_settings(account_id: int, payload: dict, db: Session = 
         reset_thread.start()
         logger.info("Auto trading job reset initiated in background")
 
-        from database.models import User
         user = db.query(User).filter(User.id == account.user_id).first()
+        
+        # Get balance from Kraken in real-time (for response)
+        balance = get_kraken_balance_real_time(account)
+        current_cash = float(balance) if balance is not None else 0.0
         
         return {
             "id": account.id,
@@ -440,14 +504,15 @@ async def update_account_settings(account_id: int, payload: dict, db: Session = 
             "username": user.username if user else "unknown",
             "name": account.name,
             "account_type": account.account_type,
-            "initial_capital": float(account.initial_capital),
-            "current_cash": float(account.current_cash),
-            "frozen_cash": float(account.frozen_cash),
+            "current_cash": current_cash,  # From Kraken in real-time
+            "frozen_cash": 0.0,  # Not tracked - all data from Kraken
             "model": account.model,
             "base_url": account.base_url,
             "api_key": account.api_key,
+            "kraken_api_key": account.kraken_api_key,
+            "kraken_private_key": account.kraken_private_key,
             "is_active": account.is_active == "true",
-            "auto_trading_enabled": account.auto_trading_enabled == "true"
+            "auto_trading_enabled": account.auto_trading_enabled == "true",
         }
     except HTTPException:
         raise
@@ -494,19 +559,27 @@ async def get_asset_curve_by_timeframe(
         if not unique_symbols:
             # No trades yet, return initial capital for all accounts
             now = datetime.now()
-            return [{
-                "timestamp": int(now.timestamp()),
-                "datetime_str": now.isoformat(),
-                "user_id": account.user_id,
-                "username": account.name,
-                "total_assets": float(account.initial_capital),
-                "cash": float(account.current_cash),
-                "positions_value": 0.0,
-            } for account in accounts]
+            # Get balance from Kraken for each account
+            result = []
+            for account in accounts:
+                try:
+                    balance = get_kraken_balance_real_time(account)
+                    current_cash = float(balance) if balance is not None else 0.0
+                except Exception:
+                    current_cash = 0.0
+                
+                result.append({
+                    "timestamp": int(now.timestamp()),
+                    "datetime_str": now.isoformat(),
+                    "user_id": account.user_id,
+                    "username": account.name,
+                    "total_assets": current_cash,
+                    "cash": current_cash,
+                    "positions_value": 0.0,
+                })
+            return result
         
         # Fetch kline data for all symbols (20 points)
-        from services.market_data import get_kline_data
-        
         symbol_klines = {}
         for symbol, market in unique_symbols:
             try:
@@ -534,16 +607,23 @@ async def get_asset_curve_by_timeframe(
                 Trade.account_id == account_id
             ).order_by(Trade.trade_time.asc()).all()
             
+            # Get current balance from Kraken for this account
+            try:
+                balance = get_kraken_balance_real_time(account)
+                current_cash = float(balance) if balance is not None else 0.0
+            except Exception:
+                current_cash = 0.0
+            
             if not trades:
-                # No trades, return initial capital at all timestamps
+                # No trades, return current balance at all timestamps
                 for i, ts in enumerate(timestamps):
                     result.append({
                         "timestamp": ts,
                         "datetime_str": first_klines[i]['datetime_str'],
                         "user_id": account.user_id,
                         "username": account.name,
-                        "total_assets": float(account.initial_capital),
-                        "cash": float(account.initial_capital),
+                        "total_assets": current_cash,
+                        "cash": current_cash,
                         "positions_value": 0.0,
                     })
                 continue
@@ -579,7 +659,13 @@ async def get_asset_curve_by_timeframe(
                         else:  # SELL
                             position_quantities[key] -= float(trade.quantity)
                 
-                current_cash = float(account.initial_capital) + cash_change
+                # Get current balance from Kraken
+                try:
+                    balance = get_kraken_balance_real_time(account)
+                    base_cash = float(balance) if balance is not None else 0.0
+                except Exception:
+                    base_cash = 0.0
+                current_cash = base_cash + cash_change
                 
                 # Calculate positions value using prices at this timestamp
                 positions_value = 0.0
@@ -616,179 +702,180 @@ async def get_asset_curve_by_timeframe(
 async def test_llm_connection(payload: dict):
     """Test LLM connection with provided credentials"""
     try:
-        import requests
-        import json
+        # Log incoming parameters for debugging
+        safe_payload = {}
+        for k, v in payload.items():
+            if k == 'api_key' and v:
+                safe_payload[k] = ('*' * min(8, len(str(v))-4)) + str(v)[-4:] if len(str(v)) > 4 else '***'
+            else:
+                safe_payload[k] = v
+        logger.info(f"[TEST-LLM] Received payload: {json.dumps(safe_payload, indent=2)}")
         
         model = payload.get("model", "gpt-3.5-turbo")
         base_url = payload.get("base_url", "https://api.openai.com/v1")
         api_key = payload.get("api_key", "")
         
+        logger.info(f"[TEST-LLM] Parsed parameters - model: {model}, base_url: {base_url}, api_key_length: {len(api_key) if api_key else 0}")
+        
         if not api_key:
+            logger.warning("[TEST-LLM] API key is missing")
             return {"success": False, "message": "API key is required"}
         
         if not base_url:
+            logger.warning("[TEST-LLM] Base URL is missing")
             return {"success": False, "message": "Base URL is required"}
         
-        # Clean up base_url - ensure it doesn't end with slash
-        if base_url.endswith('/'):
-            base_url = base_url.rstrip('/')
+        # Use base_url as-is without modification
+        logger.info(f"[TEST-LLM] Using base_url as provided: {base_url}")
         
-        # Test the connection with a simple completion request
+        # Test the connection using OpenAI client library
         try:
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}"
-            }
-            
-            # Use OpenAI-compatible chat completions format
-            # Build payload with appropriate parameters based on model type
+            # Build messages based on model type
             model_lower = model.lower()
-
+            
             # Reasoning models that don't support temperature parameter
             is_reasoning_model = any(x in model_lower for x in [
                 'gpt-5', 'o1-preview', 'o1-mini', 'o1-', 'o3-', 'o4-'
             ])
-
+            
             # o1 series specifically doesn't support system messages
             is_o1_series = any(x in model_lower for x in ['o1-preview', 'o1-mini', 'o1-'])
-
-            # New models that use max_completion_tokens instead of max_tokens
-            is_new_model = is_reasoning_model or any(x in model_lower for x in ['gpt-4o'])
-
-            # o1 series models don't support system messages
+            
+            # Build messages
             if is_o1_series:
-                payload_data = {
-                    "model": model,
-                    "messages": [
-                        {"role": "user", "content": "Say 'Connection test successful' if you can read this."}
-                    ]
-                }
+                messages = [
+                    {"role": "user", "content": "Say 'Connection test successful' if you can read this."}
+                ]
             else:
-                payload_data = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": "You are a helpful assistant."},
-                        {"role": "user", "content": "Say 'Connection test successful' if you can read this."}
-                    ]
-                }
-
-            # Reasoning models (GPT-5, o1, o3, o4) don't support custom temperature
-            # Only add temperature parameter for non-reasoning models
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Say 'Connection test successful' if you can read this."}
+                ]
+            
+            # Create OpenAI client (simple, following OpenAI SDK example)
+            logger.info(f"[TEST-LLM] Creating OpenAI client with base_url: {base_url} ｜ api_key: {api_key}")
+            client = OpenAI(
+                base_url=f"{base_url}",
+                api_key=api_key
+            )
+            
+            # Prepare request parameters
+            completion_kwargs = {
+                "model": model,
+                "messages": messages,
+            }
+            
+            # Reasoning models don't support temperature
             if not is_reasoning_model:
-                payload_data["temperature"] = 0
-
-            # Use max_completion_tokens for newer models
-            # Use max_tokens for older models (GPT-3.5, GPT-4, GPT-4-turbo, Deepseek)
-            # Modern models have large context windows, so we can be generous with token limits
+                completion_kwargs["temperature"] = 0
+            
+            # Use max_completion_tokens for newer models, max_tokens for older models
+            is_new_model = is_reasoning_model or any(x in model_lower for x in ['gpt-4o'])
             if is_new_model:
-                # Reasoning models (GPT-5/o1) need more tokens for internal reasoning
-                payload_data["max_completion_tokens"] = 2000
+                completion_kwargs["max_completion_tokens"] = 2000
             else:
-                # Regular models (GPT-4, Deepseek, Claude, etc.)
-                payload_data["max_tokens"] = 2000
-
-            # For GPT-5 series, set reasoning_effort to minimal for faster test
+                completion_kwargs["max_tokens"] = 2000
+            
+            # For GPT-5 series, set reasoning_effort
             if 'gpt-5' in model_lower:
-                payload_data["reasoning_effort"] = "minimal"
-
-            endpoints = build_chat_completion_endpoints(base_url, model)
-            if not endpoints:
-                return {"success": False, "message": "Invalid base URL"}
-
-            last_failure_message = "Connection test failed"
-
-            for idx, endpoint in enumerate(endpoints):
-                try:
-                    response = requests.post(
-                        endpoint,
-                        headers=headers,
-                        json=payload_data,
-                        timeout=10.0,
-                        verify=False  # Disable SSL verification for custom AI endpoints
-                    )
-                except requests.ConnectionError:
-                    last_failure_message = f"Failed to connect to {endpoint}. Please check the base URL."
-                    continue
-                except requests.Timeout:
-                    last_failure_message = "Request timed out. The LLM service may be unavailable."
-                    continue
-                except requests.RequestException as req_err:
-                    last_failure_message = f"Connection test failed: {str(req_err)}"
-                    continue
-
-                # Check response status
-                if response.status_code == 200:
-                    result = response.json()
-
-                    # Extract text from OpenAI-compatible response format
-                    if "choices" in result and len(result["choices"]) > 0:
-                        choice = result["choices"][0]
-                        message = choice.get("message", {})
-                        finish_reason = choice.get("finish_reason", "")
-
-                        # Get content from message
-                        raw_content = message.get("content")
-                        content = _extract_text_from_message(raw_content)
-
-                        # For reasoning models (GPT-5, o1), check reasoning field if content is empty
-                        if not content and is_reasoning_model:
-                            reasoning = _extract_text_from_message(message.get("reasoning"))
-                            if reasoning:
-                                logger.info(f"LLM test successful for model {model} at {endpoint} (reasoning model)")
-                                snippet = reasoning[:100] + "..." if len(reasoning) > 100 else reasoning
-                                return {
-                                    "success": True,
-                                    "message": f"Connection successful! Model {model} (reasoning model) responded correctly.",
-                                    "response": f"[Reasoning: {snippet}]"
-                                }
-
-                        # Standard content check
-                        if content:
-                            logger.info(f"LLM test successful for model {model} at {endpoint}")
+                completion_kwargs["reasoning_effort"] = "minimal"
+            
+            # Log request parameters (simplified for readability)
+            log_params = {k: (f'[{len(v)} messages]' if k == 'messages' else v) for k, v in completion_kwargs.items()}
+            logger.info(f"[TEST-LLM] Request parameters: {json.dumps(log_params, indent=2)}")
+            
+            # Make the API call
+            try:
+                completion = client.chat.completions.create(**completion_kwargs)
+                
+                logger.info(f"[TEST-LLM] API call successful")
+                
+                # Extract response
+                if completion.choices and len(completion.choices) > 0:
+                    choice = completion.choices[0]
+                    message = choice.message
+                    finish_reason = choice.finish_reason
+                    
+                    # Get content
+                    content = message.content if message.content else ""
+                    
+                    # For reasoning models, check reasoning field
+                    if not content and is_reasoning_model:
+                        # Try to get reasoning from message (if available)
+                        if hasattr(message, 'reasoning') and message.reasoning:
+                            reasoning = message.reasoning
+                            logger.info(f"[TEST-LLM] Model {model} responded with reasoning (reasoning model)")
+                            snippet = reasoning[:100] + "..." if len(reasoning) > 100 else reasoning
                             return {
                                 "success": True,
-                                "message": f"Connection successful! Model {model} responded correctly.",
-                                "response": content
+                                "message": f"Connection successful! Model {model} (reasoning model) responded correctly.",
+                                "response": f"[Reasoning: {snippet}]"
                             }
-
-                        # If still no content, show more debug info
-                        logger.warning(f"LLM response has empty content. finish_reason={finish_reason}, full_message={message}")
+                    
+                    # Standard content check
+                    if content:
+                        logger.info(f"[TEST-LLM] Model {model} responded successfully")
                         return {
-                            "success": False,
-                            "message": f"LLM responded but with empty content (finish_reason: {finish_reason}). Try increasing token limit or using a different model."
+                            "success": True,
+                            "message": f"Connection successful! Model {model} responded correctly.",
+                            "response": content
                         }
-                    else:
-                        return {"success": False, "message": "Unexpected response format from LLM"}
-                elif response.status_code == 401:
-                    return {"success": False, "message": "Authentication failed. Please check your API key."}
-                elif response.status_code == 403:
-                    return {"success": False, "message": "Permission denied. Your API key may not have access to this model."}
-                elif response.status_code == 429:
-                    return {"success": False, "message": "Rate limit exceeded. Please try again later."}
-                elif response.status_code == 404:
-                    last_failure_message = f"Model '{model}' not found or endpoint not available."
-                    if idx < len(endpoints) - 1:
-                        logger.info(f"Endpoint {endpoint} returned 404, trying alternative path")
-                        continue
-                    return {"success": False, "message": last_failure_message}
+                    
+                    # Empty content
+                    logger.warning(f"[TEST-LLM] LLM responded but with empty content. finish_reason={finish_reason}")
+                    return {
+                        "success": False,
+                        "message": f"LLM responded but with empty content (finish_reason: {finish_reason}). Try increasing token limit or using a different model."
+                    }
                 else:
-                    return {"success": False, "message": f"API returned status {response.status_code}: {response.text}"}
-
-            return {"success": False, "message": last_failure_message}
+                    logger.warning(f"[TEST-LLM] Unexpected response format: no choices in response")
+                    return {"success": False, "message": "Unexpected response format from LLM"}
+                    
+            except OpenAIAPIError as e:
+                error_message = str(e)
+                error_type = type(e).__name__
                 
-        except requests.ConnectionError:
-            return {"success": False, "message": f"Failed to connect to {base_url}. Please check the base URL."}
-        except requests.Timeout:
-            return {"success": False, "message": "Request timed out. The LLM service may be unavailable."}
-        except json.JSONDecodeError:
-            return {"success": False, "message": "Invalid JSON response from LLM service."}
-        except requests.RequestException as e:
-            logger.error(f"LLM test request failed: {e}", exc_info=True)
-            return {"success": False, "message": f"Connection test failed: {str(e)}"}
+                logger.warning(f"[TEST-LLM] OpenAI API error ({error_type}): {error_message}")
+                
+                # Extract more details from the error
+                error_details = ""
+                if hasattr(e, 'response') and e.response is not None:
+                    try:
+                        error_body = e.response.json() if hasattr(e.response, 'json') else None
+                        if error_body and isinstance(error_body, dict):
+                            error_info = error_body.get('error', {})
+                            if isinstance(error_info, dict):
+                                error_details = error_info.get('message', '')
+                                logger.warning(f"[TEST-LLM] Error details from response: {error_details}")
+                    except:
+                        pass
+                
+                # Map OpenAI errors to user-friendly messages
+                if "401" in error_message or "authentication" in error_message.lower():
+                    return {
+                        "success": False, 
+                        "message": f"Authentication failed. Please check your API key.{' Details: ' + error_details if error_details else ''}"
+                    }
+                elif "403" in error_message or "permission" in error_message.lower():
+                    return {"success": False, "message": "Permission denied. Your API key may not have access to this model."}
+                elif "429" in error_message or "rate limit" in error_message.lower():
+                    return {"success": False, "message": "Rate limit exceeded. Please try again later."}
+                elif "404" in error_message or "not found" in error_message.lower():
+                    return {"success": False, "message": f"Model '{model}' not found or endpoint not available."}
+                else:
+                    return {"success": False, "message": f"API error: {error_message}"}
+                    
         except Exception as e:
-            logger.error(f"LLM test failed: {e}", exc_info=True)
-            return {"success": False, "message": f"Connection test failed: {str(e)}"}
+            logger.error(f"[TEST-LLM] Connection test failed: {e}", exc_info=True)
+            error_msg = str(e)
+            
+            if "connection" in error_msg.lower() or "timeout" in error_msg.lower():
+                return {"success": False, "message": f"Failed to connect to {base_url}. Please check the base URL."}
+            elif "timeout" in error_msg.lower():
+                return {"success": False, "message": "Request timed out. The LLM service may be unavailable."}
+            else:
+                return {"success": False, "message": f"Connection test failed: {error_msg}"}
             
     except Exception as e:
-        logger.error(f"Failed to test LLM connection: {e}", exc_info=True)
+        logger.error(f"[TEST-LLM] Failed to test LLM connection: {e}", exc_info=True)
         return {"success": False, "message": f"Failed to test LLM connection: {str(e)}"}

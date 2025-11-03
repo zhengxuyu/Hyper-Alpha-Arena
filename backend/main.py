@@ -1,23 +1,45 @@
-from datetime import datetime, timezone
+import logging
+import os
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
+from config.settings import DEFAULT_TRADING_CONFIGS
+
+# Configure logging
+# Log file path: project root/arena.log (as used in start_arena.sh)
+log_file_path = os.path.join(os.path.dirname(__file__), '..', 'arena.log')
+log_file_path = os.path.abspath(log_file_path)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Output to console
+        logging.FileHandler(log_file_path, mode='a'),  # Output to file
+    ]
+)
+
+# Set root logger level
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Set uvicorn access logger to INFO
+logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+from database.connection import Base, SessionLocal
+from database.models import (Account, AccountAssetSnapshot, SystemConfig,
+                             TradingConfig, User)
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-import os
-
-from decimal import Decimal
-
-from database.connection import engine, Base, SessionLocal
-from database.models import TradingConfig, User, Account, SystemConfig, AccountAssetSnapshot
+from fastapi.staticfiles import StaticFiles
 from services.asset_curve_calculator import invalidate_asset_curve_cache
-from config.settings import DEFAULT_TRADING_CONFIGS
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
 app = FastAPI(title="Crypto Paper Trading API")
 
 # Health check endpoint
@@ -165,9 +187,10 @@ def on_startup():
     frontend_watcher_thread.start()
     print("Frontend file watcher started")
 
-    # Create tables
+    # Create tables in the single database
+    from database.connection import engine
     Base.metadata.create_all(bind=engine)
-    # Seed trading configs if empty
+    # Seed trading configs if empty (only in paper database for now)
     db: Session = SessionLocal()
     try:
         # Ensure AI decision log table has snapshot columns (backfill on existing installs)
@@ -183,6 +206,9 @@ def on_startup():
         except Exception as migration_err:
             db.rollback()
             print(f"[startup] Failed to ensure AI decision log snapshot columns: {migration_err}")
+        
+        # Ensure accounts table has trade_mode column (migration for existing installs)
+        # Migration logic removed - trade_mode column is no longer used
 
         if db.query(TradingConfig).count() == 0:
             for cfg in DEFAULT_TRADING_CONFIGS.values():
@@ -200,7 +226,7 @@ def on_startup():
             db.commit()
         # Ensure only default user and its account exist
         # Delete all non-default users and their accounts
-        from database.models import Position, Order, Trade
+        from database.models import Order, Position, Trade
         
         non_default_users = db.query(User).filter(User.username != "default").all()
         for user in non_default_users:
@@ -263,16 +289,17 @@ def on_shutdown():
     shutdown_services()
 
 
+from api.account_routes import router as account_router
+from api.arena_routes import router as arena_router
+from api.config_routes import router as config_router
+from api.crypto_routes import router as crypto_router
 # API routes
 from api.market_data_routes import router as market_data_router
 from api.order_routes import router as order_router
-from api.account_routes import router as account_router
-from api.config_routes import router as config_router
-from api.ranking_routes import router as ranking_router
-from api.crypto_routes import router as crypto_router
-from api.arena_routes import router as arena_router
-from api.system_log_routes import router as system_log_router
 from api.prompt_routes import router as prompt_router
+from api.ranking_routes import router as ranking_router
+from api.system_log_routes import router as system_log_router
+
 # Removed: AI account routes merged into account_routes (unified AI trader accounts)
 
 app.include_router(market_data_router)

@@ -1,6 +1,8 @@
 from decimal import Decimal
-from sqlalchemy.orm import Session
+
 from database.models import Position
+from sqlalchemy.orm import Session
+
 from .market_data import get_last_price
 
 

@@ -2,14 +2,14 @@
 System config API routes
 """
 
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.orm import Session
-from pydantic import BaseModel
-from typing import Optional
 import logging
+from typing import Optional
 
 from database.connection import SessionLocal
 from database.models import SystemConfig
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 

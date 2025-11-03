@@ -1,9 +1,10 @@
-from sqlalchemy.orm import Session
-from typing import Optional
-from database.models import User, UserAuthSession
+import datetime
 import hashlib
 import secrets
-import datetime
+from typing import Optional
+
+from database.models import User, UserAuthSession
+from sqlalchemy.orm import Session
 
 
 def create_user(

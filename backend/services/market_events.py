@@ -2,8 +2,8 @@
 Market data event dispatcher for price updates.
 """
 
-from typing import Callable, List, Dict, Any
 from threading import Lock
+from typing import Any, Callable, Dict, List
 
 PriceEventHandler = Callable[[Dict[str, Any]], None]
 

@@ -1,27 +1,34 @@
 """
 AI Decision Service - Handles AI model API calls for trading decisions
 """
+import asyncio
+import json
 import logging
 import random
-import json
-import time
 import re
-from decimal import Decimal
-from typing import Any, Dict, Optional, List
+import time
 from datetime import datetime
+from decimal import Decimal
+from typing import Any, Dict, List, Optional
 
 import requests
+from database.models import Account, AIDecisionLog, Position
+from repositories import prompt_repo
+from repositories.strategy_repo import set_last_trigger
+# Dynamic import to avoid circular dependency with api.ws
+# Note: api.ws imports scheduler, scheduler imports trading_commands, trading_commands imports ai_decision_service
+from services.asset_calculator import calc_positions_value
+from services.kraken_sync import get_kraken_balance_real_time
+from services.news_feed import fetch_latest_news
+from services.system_logger import system_logger
 from sqlalchemy.orm import Session
 
-from database.models import Position, Account, AIDecisionLog
-from services.asset_calculator import calc_positions_value
-from services.news_feed import fetch_latest_news
-from repositories.strategy_repo import set_last_trigger
-from services.system_logger import system_logger
-from repositories import prompt_repo
-
-
 logger = logging.getLogger(__name__)
+
+# SSL verification configuration
+# Set to True to enable SSL verification (recommended for production)
+# Set to False only for custom AI endpoints with self-signed certificates
+ENABLE_SSL_VERIFICATION = False  # TODO: Move to config file for production use
 
 #  mode API keys that should be skipped
 DEMO_API_KEYS = {
@@ -193,19 +200,27 @@ def _get_portfolio_data(db: Session, account: Account) -> Dict:
                 "current_value": float(pos.quantity) * float(pos.avg_cost)
             }
     
+    # Get balance from Kraken in real-time
+    try:
+        balance = get_kraken_balance_real_time(account)
+        current_cash = float(balance) if balance is not None else 0.0
+    except Exception:
+        current_cash = 0.0
+    
     return {
-        "cash": float(account.current_cash),
-        "frozen_cash": float(account.frozen_cash),
+        "cash": current_cash,
+        "frozen_cash": 0.0,  # Not tracked - all data from Kraken
         "positions": portfolio,
-        "total_assets": float(account.current_cash) + calc_positions_value(db, account.id)
+        "total_assets": current_cash + calc_positions_value(db, account.id)
     }
 
 
 def build_chat_completion_endpoints(base_url: str, model: Optional[str] = None) -> List[str]:
     """Build a list of possible chat completion endpoints for an OpenAI-compatible API.
 
-    Supports Deepseek-specific behavior where both `/chat/completions` and `/v1/chat/completions`
-    might be valid, depending on how the base URL is configured.
+    Supports:
+    - Deepseek-specific behavior where both `/chat/completions` and `/v1/chat/completions` might be valid
+    - Azure OpenAI where base_url already includes `/openai/v1/` path
     """
     if not base_url:
         return []
@@ -216,6 +231,16 @@ def build_chat_completion_endpoints(base_url: str, model: Optional[str] = None) 
 
     endpoints: List[str] = []
     base_lower = normalized.lower()
+    
+    # Check if base_url already includes a path (e.g., Azure OpenAI with /openai/v1/)
+    # Azure OpenAI format: https://xxx.azure.com/openai/v1/
+    # If it ends with /v1 or /v1/, it's likely Azure OpenAI format
+    if base_lower.endswith('/openai/v1') or base_lower.endswith('/openai/v1/'):
+        # Azure OpenAI: base_url is already the complete path, just append /chat/completions
+        endpoints.append(f"{normalized.rstrip('/')}/chat/completions")
+        return endpoints
+    
+    # Standard OpenAI-compatible API
     endpoints.append(f"{normalized}/chat/completions")
 
     is_deepseek = "deepseek.com" in base_lower
@@ -381,12 +406,21 @@ def call_ai_for_decision(
         for endpoint in endpoints:
             for attempt in range(max_retries):
                 try:
+                    # SSL verification: disable only for custom endpoints with self-signed certs
+                    # In production, this should be controlled via configuration
+                    verify_ssl = ENABLE_SSL_VERIFICATION
+                    if not verify_ssl:
+                        logger.warning(
+                            f"SSL verification disabled for AI endpoint {endpoint}. "
+                            "This should only be used for custom endpoints with self-signed certificates."
+                        )
+                    
                     response = requests.post(
                         endpoint,
                         headers=headers,
                         json=payload,
                         timeout=30,
-                        verify=False,  # Disable SSL verification for custom AI endpoints
+                        verify=verify_ssl,
                     )
 
                     if response.status_code == 200:
@@ -571,8 +605,8 @@ def call_ai_for_decision(
         try:
             if 'text_content' in locals():
                 logger.error(f"Content that failed to parse: {text_content[:500]}")
-        except:
-            pass
+        except Exception as log_err:
+            logger.warning(f"Failed to log parsing error content: {log_err}")
         return None
     except Exception as err:
         logger.error(f"Unexpected error calling AI: {err}", exc_info=True)
@@ -664,11 +698,11 @@ def save_ai_decision(db: Session, account: Account, decision: Dict, portfolio: D
         )
 
         # Broadcast AI decision update via WebSocket
-        import asyncio
-        from api.ws import broadcast_model_chat_update
-
+        # Use dynamic import to avoid circular dependency with api.ws
         try:
-            asyncio.create_task(broadcast_model_chat_update({
+            from api.ws import broadcast_model_chat_update, manager
+            # Use manager's schedule_task for thread-safe async execution
+            manager.schedule_task(broadcast_model_chat_update({
                 "id": decision_log.id,
                 "account_id": account.id,
                 "account_name": account.name,

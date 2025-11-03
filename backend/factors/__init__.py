@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from __future__ import annotations
-
 import importlib
 import pkgutil
-from typing import List, Dict, Optional
-import pandas as pd
+from typing import Dict, List, Optional
 
+import pandas as pd
 from models import Factor
 
 __all__ = ["list_factors", "compute_all_factors", "compute_selected_factors"]

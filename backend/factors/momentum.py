@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import Dict, Optional, List
-import pandas as pd
+from typing import Dict, List, Optional
+
 import numpy as np
-
+import pandas as pd
 from models import Factor
-
 
 
 def calculate_momentum_simple(df: pd.DataFrame) -> float:

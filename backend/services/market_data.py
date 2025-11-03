@@ -1,12 +1,11 @@
-from typing import Dict, List, Any
 import logging
-from .hyperliquid_market_data import (
-    get_last_price_from_hyperliquid,
-    get_kline_data_from_hyperliquid,
-    get_market_status_from_hyperliquid,
-    get_all_symbols_from_hyperliquid,
-    hyperliquid_client,
-)
+from typing import Any, Dict, List
+
+from .hyperliquid_market_data import (get_all_symbols_from_hyperliquid,
+                                      get_kline_data_from_hyperliquid,
+                                      get_last_price_from_hyperliquid,
+                                      get_market_status_from_hyperliquid,
+                                      hyperliquid_client)
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +14,7 @@ def get_last_price(symbol: str, market: str = "CRYPTO") -> float:
     key = f"{symbol}.{market}"
     
     # Check cache first
-    from .price_cache import get_cached_price, cache_price
+    from .price_cache import cache_price, get_cached_price
     cached_price = get_cached_price(symbol, market)
     if cached_price is not None:
         logger.debug(f"Using cached price for {key}: {cached_price}")

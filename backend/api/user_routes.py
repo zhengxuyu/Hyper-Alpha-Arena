@@ -2,20 +2,18 @@
 User authentication API routes
 """
 
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.orm import Session
-from typing import List
 import logging
+from typing import List
 
 from database.connection import SessionLocal
 from database.models import User
-from repositories.user_repo import (
-    create_user, get_user, get_user_by_username, 
-    update_user, create_auth_session, verify_auth_session
-)
-from schemas.user import (
-    UserCreate, UserUpdate, UserOut, UserLogin, UserAuthResponse
-)
+from fastapi import APIRouter, Depends, HTTPException
+from repositories.user_repo import (create_auth_session, create_user, get_user,
+                                    get_user_by_username, update_user,
+                                    verify_auth_session)
+from schemas.user import (UserAuthResponse, UserCreate, UserLogin, UserOut,
+                          UserUpdate)
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
