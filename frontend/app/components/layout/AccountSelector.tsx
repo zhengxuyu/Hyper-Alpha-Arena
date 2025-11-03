@@ -53,10 +53,10 @@ export default function AccountSelector({ currentAccount, onAccountChange, usern
 
   const fetchAccounts = async () => {
     try {
-      // Use default functions with hardcoded username for paper trading
+      // Use default functions with hardcoded username
       const accountData = await getAccounts()
       console.log('Fetched accounts:', accountData)
-      
+
       // Get account-specific data for each account
       // Fast path: avoid per-account overview calls to minimize latency on page switches
       const accountsWithAssets: AccountWithAssets[] = accountData.map((account) => ({
@@ -64,7 +64,7 @@ export default function AccountSelector({ currentAccount, onAccountChange, usern
         total_assets: account.current_cash + account.frozen_cash,
         positions_value: 0,
       }))
-      
+
       setAccounts(accountsWithAssets)
     } catch (error) {
       console.error('Error fetching accounts:', error)
@@ -97,8 +97,8 @@ export default function AccountSelector({ currentAccount, onAccountChange, usern
   }
 
   // Find the current account in our loaded accounts list (which has total_assets)
-  const currentAccountWithAssets = currentAccount 
-    ? accounts.find(a => a.id === currentAccount.id) 
+  const currentAccountWithAssets = currentAccount
+    ? accounts.find(a => a.id === currentAccount.id)
     : null
 
   return (

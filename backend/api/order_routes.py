@@ -4,6 +4,7 @@ Provides functionality for creating, querying, and canceling orders
 """
 
 import logging
+import time
 from typing import List, Optional
 
 from database.connection import SessionLocal
@@ -334,7 +335,6 @@ async def orders_health_check(db: Session = Depends(get_db)):
         filled_orders = db.query(Order).filter(Order.status == "FILLED").count()
         cancelled_orders = db.query(Order).filter(Order.status == "CANCELLED").count()
         
-        import time
         return {
             "status": "healthy",
             "timestamp": int(time.time() * 1000),

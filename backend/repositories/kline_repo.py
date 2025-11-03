@@ -3,6 +3,7 @@ K-line data repository module
 Provides K-line data database operations
 """
 
+import time
 from typing import List, Optional
 
 from database.connection import get_db
@@ -114,7 +115,6 @@ class KlineRepository:
             period: Time period
             keep_days: Days to keep
         """
-        import time
         cutoff_timestamp = int((time.time() - keep_days * 24 * 3600) * 1000)
         
         self.db.query(cryptoKline).filter(

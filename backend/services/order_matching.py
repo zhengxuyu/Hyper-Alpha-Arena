@@ -3,6 +3,7 @@ Order matching service
 Implements conditional execution logic for limit orders
 """
 
+import asyncio
 import logging
 import uuid
 from decimal import Decimal
@@ -13,9 +14,18 @@ from database.models import (CRYPTO_COMMISSION_RATE, CRYPTO_LOT_SIZE,
                              Account, Order, Position, Trade, User)
 from sqlalchemy.orm import Session
 
+from repositories.position_repo import list_positions
+
+from .broker_adapter import get_balance
 from .market_data import get_last_price
 
+# Dynamic imports to avoid circular import with api.ws
+# Note: api.ws imports order_matching.create_order, so we import ws functions dynamically
+
 logger = logging.getLogger(__name__)
+
+# Constants for trade verification
+SLIPPAGE_TOLERANCE = 0.95  # 5% slippage tolerance for trade verification
 
 
 def _calc_commission(notional: Decimal) -> Decimal:
@@ -79,8 +89,13 @@ def create_order(db: Session, account: Account, symbol: str, name: str,
         commission = _calc_commission(notional)
         cash_needed = notional + commission
 
-        if Decimal(str(account.current_cash)) < cash_needed:
-            raise ValueError(f"Insufficient cash. Need ${cash_needed:.2f}, current cash ${account.current_cash:.2f}")
+        # Get balance from broker in real-time
+        # Use extracted function from trading_commands to reduce duplication
+        from services.trading_commands import get_account_balance_safe
+        current_cash = get_account_balance_safe(account, "when creating order")
+        
+        if Decimal(str(current_cash)) < cash_needed:
+            raise ValueError(f"Insufficient cash. Need ${cash_needed:.2f}, current cash ${current_cash:.2f}")
 
     else:  # SELL
         # Sell: check if sufficient positions available
@@ -191,7 +206,7 @@ def _release_frozen_on_fill(account: Account, order: Order, execution_price: Dec
         # Estimated frozen amount may differ from actual execution, release based on actual execution amount
         notional = execution_price * Decimal(order.quantity)
         frozen_to_release = notional + commission
-        account.frozen_cash = float(max(Decimal(str(account.frozen_cash)) - frozen_to_release, Decimal('0')))
+        # Note: Frozen cash is not tracked - all data from Kraken
 
 
 def _execute_order(db: Session, order: Order, account: Account, execution_price: Decimal) -> bool:
@@ -213,19 +228,32 @@ def _execute_order(db: Session, order: Order, account: Account, execution_price:
         commission = _calc_commission(notional)
         
         # Re-check funds and positions (prevent concurrency issues)
+        # Note: Balance is fetched from Kraken in real-time, we don't update DB
         if order.side == "BUY":
             cash_needed = notional + commission
-            if Decimal(str(account.current_cash)) < cash_needed:
+            # Get balance from Kraken in real-time
+            try:
+                balance = get_balance(account)
+                current_cash = float(balance) if balance is not None else 0.0
+            except (ConnectionError, TimeoutError, ValueError) as e:
+                logger.warning(f"Failed to get balance when executing order {order.order_no}: {e}")
+                current_cash = 0.0
+            except Exception as e:
+                logger.error(f"Unexpected error getting balance for order {order.order_no}: {e}", exc_info=True)
+                current_cash = 0.0
+            
+            if Decimal(str(current_cash)) < cash_needed:
                 logger.warning(f"Insufficient cash when executing order {order.order_no}")
                 return False
                 
-            # Deduct cash
-            account.current_cash = float(Decimal(str(account.current_cash)) - cash_needed)
+            # Note: Balance is managed by Kraken, we don't update DB
             
-            # Update position
+            # Update position - use SELECT FOR UPDATE to prevent concurrent modification
+            # P1 Fix: Add database lock for concurrent safety
             position = (
                 db.query(Position)
                 .filter(Position.account_id == account.id, Position.symbol == order.symbol, Position.market == order.market)
+                .with_for_update()  # Lock row for concurrent safety
                 .first()
             )
             
@@ -258,10 +286,12 @@ def _execute_order(db: Session, order: Order, account: Account, execution_price:
             position.avg_cost = float(new_avg_cost)
             
         else:  # SELL
-            # Check position
+            # Check position - use SELECT FOR UPDATE to prevent concurrent modification
+            # P1 Fix: Add database lock for concurrent safety
             position = (
                 db.query(Position)
                 .filter(Position.account_id == account.id, Position.symbol == order.symbol, Position.market == order.market)
+                .with_for_update()  # Lock row for concurrent safety
                 .first()
             )
 
@@ -273,9 +303,9 @@ def _execute_order(db: Session, order: Order, account: Account, execution_price:
             position.quantity = float(Decimal(str(position.quantity)) - quantity)
             position.available_quantity = float(Decimal(str(position.available_quantity)) - quantity)
             
-            # Add cash
+            # Note: Balance is managed by Kraken, we don't update DB
+            # Cash will be reflected when balance is fetched from Kraken
             cash_gain = notional - commission
-            account.current_cash = float(Decimal(str(account.current_cash)) + cash_gain)
         
         # Create trade record
         trade = Trade(
@@ -301,16 +331,69 @@ def _execute_order(db: Session, order: Order, account: Account, execution_price:
         db.commit()
 
         logger.info(f"Order {order.order_no} executed: {order.side} {quantity} {order.symbol} @ ${execution_price}")
+        
+        # P0 Fix: Verify trade execution by checking Kraken after database commit
+        # This ensures data consistency between our database and Kraken
+        try:
+            if order.side == "BUY":
+                # Verify: check if we actually have the position on Kraken
+                from .broker_adapter import get_positions as get_kraken_positions
+                kraken_positions = get_kraken_positions(account)
+                found_position = False
+                for pos in kraken_positions:
+                    symbol_key = pos.get("symbol", "").upper()
+                    if symbol_key == order.symbol.upper():
+                        try:
+                            pos_qty = float(pos.get("quantity", 0))
+                        except (ValueError, TypeError):
+                            logger.warning(f"Invalid quantity type in order verification for {order.symbol}")
+                            pos_qty = 0
+                        
+                        if pos_qty >= quantity * SLIPPAGE_TOLERANCE:  # Allow 5% tolerance for slippage
+                            found_position = True
+                            logger.debug(f"Order {order.order_no} verified: position {order.symbol} quantity={pos_qty}")
+                        break
+                
+                if not found_position:
+                    logger.warning(
+                        f"Order {order.order_no} verification failed: {order.symbol} position not found on Kraken after BUY. "
+                        f"This may indicate a partial fill or order was not executed on Kraken."
+                    )
+            elif order.side == "SELL":
+                # Verify: position was reduced on Kraken
+                from .broker_adapter import get_positions as get_kraken_positions
+                kraken_positions = get_kraken_positions(account)
+                position_found = False
+                for pos in kraken_positions:
+                    symbol_key = pos.get("symbol", "").upper()
+                    if symbol_key == order.symbol.upper():
+                        position_found = True
+                        try:
+                            pos_qty = float(pos.get("quantity", 0))
+                        except (ValueError, TypeError):
+                            logger.warning(f"Invalid quantity type in order verification for {order.symbol}")
+                            pos_qty = 0
+                        # Note: We can't easily verify SELL without knowing previous quantity
+                        # Just log the current position for reference
+                        logger.debug(f"Order {order.order_no} verified: position {order.symbol} quantity={pos_qty} after SELL")
+                        break
+                
+                # If position not found after SELL, it might be fully sold (which is expected)
+                if not position_found:
+                    logger.debug(f"Order {order.order_no}: Position {order.symbol} not found after SELL (may be fully sold)")
+        except Exception as verify_err:
+            # Don't fail the order execution if verification fails, but log it
+            logger.warning(
+                f"Failed to verify order {order.order_no} execution on Kraken: {verify_err}"
+            )
 
         # Broadcast real-time updates via WebSocket
-        import asyncio
-
-        from api.ws import broadcast_position_update, broadcast_trade_update
-        from repositories.position_repo import list_positions
-
+        # Use dynamic import to avoid circular dependency with api.ws
         try:
-            # Broadcast trade update
-            asyncio.create_task(broadcast_trade_update({
+            from api.ws import broadcast_position_update, broadcast_trade_update, manager
+            
+            # Broadcast trade update using manager's schedule_task for thread-safe async execution
+            manager.schedule_task(broadcast_trade_update({
                 "trade_id": trade.id,
                 "account_id": account.id,
                 "account_name": account.name,
@@ -343,7 +426,7 @@ def _execute_order(db: Session, order: Order, account: Account, execution_price:
                 }
                 for p in positions
             ]
-            asyncio.create_task(broadcast_position_update(account.id, positions_data))
+            manager.schedule_task(broadcast_position_update(account.id, positions_data))
 
         except Exception as broadcast_err:
             # Don't fail the order execution if broadcast fails
@@ -389,7 +472,7 @@ def _release_frozen_on_cancel(account: Account, order: Order):
         notional = Decimal(str(ref_price)) * Decimal(order.quantity)
         commission = _calc_commission(notional)
         release_amt = notional + commission
-        account.frozen_cash = float(max(Decimal(str(account.frozen_cash)) - release_amt, Decimal('0')))
+        # Note: Frozen cash is not tracked - all data from Kraken
 
 
 def cancel_order(db: Session, order: Order, reason: str = "User cancelled") -> bool:

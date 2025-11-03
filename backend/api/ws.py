@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, Optional, Set
 
-from database.connection import SessionLocal, get_session_for_mode
+from database.connection import SessionLocal
 from database.models import Account, AIDecisionLog, CryptoPrice, Trade, User
 from fastapi import WebSocket, WebSocketDisconnect
 from repositories.account_repo import (get_account,
@@ -17,6 +17,11 @@ from repositories.position_repo import list_positions
 from repositories.user_repo import get_or_create_user, get_user
 from services.asset_calculator import calc_positions_value
 from services.asset_curve_calculator import get_all_asset_curves_data_new
+from services.kraken_sync import (
+    get_kraken_balance_real_time,
+    get_kraken_positions_real_time,
+    get_kraken_open_orders_real_time
+)
 from services.market_data import get_last_price
 from services.order_matching import create_order
 from services.scheduler import (add_account_snapshot_job,
@@ -35,8 +40,8 @@ class ConnectionManager:
     def register(self, account_id: Optional[int], websocket: WebSocket):
         if account_id is not None:
             self.active_connections.setdefault(account_id, set()).add(websocket)
-            # Add scheduled snapshot task for new account
-            add_account_snapshot_job(account_id, interval_seconds=10)
+            # Add scheduled snapshot task for new account (30 seconds to avoid Kraken API rate limits)
+            add_account_snapshot_job(account_id, interval_seconds=30)
 
     def unregister(self, account_id: Optional[int], websocket: WebSocket):
         if account_id is not None and account_id in self.active_connections:
@@ -205,21 +210,83 @@ def get_all_asset_curves_data(db: Session, timeframe: str = "1h"):
 
 async def _send_snapshot_optimized(db: Session, account_id: int):
     """Optimized version of snapshot that reduces expensive operations"""
-    account = get_account(db, account_id)
+    # The db parameter should already be from the correct database (real or paper)
+    account = db.query(Account).filter(Account.id == account_id).first()
     if not account:
+        logging.warning(f"[SNAPSHOT] Account {account_id} not found in database for snapshot")
         return
     
-    positions = list_positions(db, account_id)
-    orders = list_orders(db, account_id)
+    # Get balance from Kraken in real-time
+    try:
+        balance = get_kraken_balance_real_time(account)
+        current_cash = float(balance) if balance is not None else 0.0
+    except Exception as e:
+        print(f"[DEBUG] _send_snapshot_optimized: Failed to get balance from Kraken: {e}")
+        current_cash = 0.0
+    
+    print(f"[DEBUG] _send_snapshot_optimized: account_id={account_id}, cash=${current_cash:.2f}")
+    logging.info(f"[SNAPSHOT] Sending snapshot for account {account_id}, cash=${current_cash:.2f}")
+    
+    # Get positions and orders from Kraken in real-time
+    try:
+        positions_data = get_kraken_positions_real_time(account)
+        orders_data = get_kraken_open_orders_real_time(account)
+    except Exception as e:
+        print(f"[DEBUG] _send_snapshot_optimized: Failed to get positions/orders from Kraken: {e}")
+        positions_data = []
+        orders_data = []
+    
+    # Convert Kraken positions to format expected by frontend
+    positions = [
+        {
+            "id": i,
+            "account_id": account_id,
+            "symbol": pos["symbol"],
+            "name": pos.get("name", pos["symbol"]),
+            "market": "CRYPTO",
+            "quantity": float(pos["quantity"]),
+            "available_quantity": float(pos.get("available_quantity", pos["quantity"])),
+            "avg_cost": float(pos.get("avg_cost", 0)),
+        }
+        for i, pos in enumerate(positions_data)
+    ]
+    
+    # Convert Kraken orders to format expected by frontend
+    orders = [
+        {
+            "id": i,
+            "account_id": account_id,
+            "order_no": order.get("order_id", str(i)),
+            "symbol": order["symbol"],
+            "name": order.get("name", order["symbol"]),
+            "market": "CRYPTO",
+            "side": order["side"],
+            "order_type": order["order_type"],
+            "price": float(order.get("price", 0)) if order.get("price") else None,
+            "quantity": float(order["quantity"]),
+            "filled_quantity": float(order.get("filled_quantity", 0)),
+            "status": order["status"],
+        }
+        for i, order in enumerate(orders_data)
+    ]
+    
+    # Get trades from metadata DB (completed trades are stored)
     trades = (
-        db.query(Trade).filter(Trade.account_id == account_id).order_by(Trade.trade_time.desc()).limit(10).all()  # Reduced from 20 to 10
+        db.query(Trade).filter(Trade.account_id == account_id).order_by(Trade.trade_time.desc()).limit(10).all()
     )
     ai_decisions = (
-        db.query(AIDecisionLog).filter(AIDecisionLog.account_id == account_id).order_by(AIDecisionLog.decision_time.desc()).limit(10).all()  # Reduced from 20 to 10
+        db.query(AIDecisionLog).filter(AIDecisionLog.account_id == account_id).order_by(AIDecisionLog.decision_time.desc()).limit(10).all()
     )
     
-    # Use cached positions value calculation
-    positions_value = calc_positions_value(db, account_id)
+    # Calculate positions value from real-time data
+    positions_value = 0.0
+    for pos in positions_data:
+        try:
+            price = get_last_price(pos["symbol"], "CRYPTO")
+            if price:
+                positions_value += float(price) * float(pos["quantity"])
+        except Exception:
+            pass
 
     overview = {
         "account": {
@@ -227,20 +294,20 @@ async def _send_snapshot_optimized(db: Session, account_id: int):
             "user_id": account.user_id,
             "name": account.name,
             "account_type": account.account_type,
-            "initial_capital": float(account.initial_capital),
-            "current_cash": float(account.current_cash),
-            "frozen_cash": float(account.frozen_cash),
+            "initial_capital": current_cash,  # Use current balance as baseline for return calculation
+            "current_cash": current_cash,
+            "frozen_cash": 0.0,  # Not tracked - all data from Kraken
         },
-        "total_assets": positions_value + float(account.current_cash),
+        "total_assets": positions_value + current_cash,
         "positions_value": positions_value,
     }
     
-    # Optimize position enrichment - batch price fetching
+    # Enrich positions with latest price and market value
     enriched_positions = []
     price_error_message = None
     
     # Group positions by symbol to reduce API calls
-    unique_symbols = set((p.symbol, p.market) for p in positions)
+    unique_symbols = set((p["symbol"], p["market"]) for p in positions)
     price_cache = {}
     
     # Fetch all unique prices in one go
@@ -255,18 +322,18 @@ async def _send_snapshot_optimized(db: Session, account_id: int):
                 price_error_message = error_msg
 
     for p in positions:
-        price = price_cache.get((p.symbol, p.market))
+        price = price_cache.get((p["symbol"], p["market"]))
         enriched_positions.append({
-            "id": p.id,
-            "account_id": p.account_id,
-            "symbol": p.symbol,
-            "name": p.name,
-            "market": p.market,
-            "quantity": float(p.quantity),
-            "available_quantity": float(p.available_quantity),
-            "avg_cost": float(p.avg_cost),
+            "id": p["id"],
+            "account_id": p["account_id"],
+            "symbol": p["symbol"],
+            "name": p["name"],
+            "market": p["market"],
+            "quantity": float(p["quantity"]),
+            "available_quantity": float(p["available_quantity"]),
+            "avg_cost": float(p["avg_cost"]),
             "last_price": float(price) if price is not None else None,
-            "market_value": (float(price) * float(p.quantity)) if price is not None else None,
+            "market_value": (float(price) * float(p["quantity"])) if price is not None else None,
         })
 
     # Prepare response data - exclude expensive asset curve calculation for frequent updates
@@ -345,30 +412,83 @@ async def _send_snapshot_optimized(db: Session, account_id: int):
 
 
 async def _send_snapshot(db: Session, account_id: int):
-    account = get_account(db, account_id)
+    """Send snapshot - trading data fetched from Kraken in real-time"""
+    # Get account metadata from metadata database
+    account = db.query(Account).filter(Account.id == account_id).first()
     if not account:
         return
-    positions = list_positions(db, account_id)
-    orders = list_orders(db, account_id)
+    
+    # Get trading data from Kraken in real-time
+    try:
+        balance = get_kraken_balance_real_time(account)
+        positions_data = get_kraken_positions_real_time(account)
+        orders_data = get_kraken_open_orders_real_time(account)
+    except Exception as e:
+        logging.error(f"Failed to fetch Kraken data for account {account_id}: {e}")
+        balance = None
+        positions_data = []
+        orders_data = []
+    
+    # Convert Kraken positions to format expected by frontend
+    positions = [
+        {
+            "id": i,
+            "account_id": account_id,
+            "symbol": pos["symbol"],
+            "quantity": float(pos["quantity"]),
+            "available_quantity": float(pos["available_quantity"]),
+            "avg_cost": float(pos["avg_cost"]),
+            "market": "CRYPTO",
+        }
+        for i, pos in enumerate(positions_data)
+    ]
+    
+    # Convert Kraken orders to format expected by frontend
+    orders = [
+        {
+            "id": i,
+            "account_id": account_id,
+            "symbol": order["symbol"],
+            "side": order["side"],
+            "order_type": order["order_type"],
+            "quantity": float(order["quantity"]),
+            "price": float(order.get("price", 0)),
+            "status": order["status"],
+            "order_no": order.get("order_id", ""),
+            "create_time": order.get("open_time", datetime.now()),
+        }
+        for i, order in enumerate(orders_data)
+    ]
+    
+    # Get trades and AI decisions from metadata database
     trades = (
         db.query(Trade).filter(Trade.account_id == account_id).order_by(Trade.trade_time.desc()).limit(20).all()
     )
     ai_decisions = (
         db.query(AIDecisionLog).filter(AIDecisionLog.account_id == account_id).order_by(AIDecisionLog.decision_time.desc()).limit(20).all()
     )
-    positions_value = calc_positions_value(db, account_id)
-
+    # Calculate positions value
+    positions_value = 0.0
+    for pos in positions_data:
+        try:
+            price = get_last_price(pos["symbol"], "CRYPTO")
+            if price:
+                positions_value += float(price) * float(pos["quantity"])
+        except Exception:
+            pass
+    
+    current_cash = float(balance) if balance is not None else 0.0
+    
     overview = {
         "account": {
             "id": account.id,
             "user_id": account.user_id,
             "name": account.name,
             "account_type": account.account_type,
-            "initial_capital": float(account.initial_capital),
-            "current_cash": float(account.current_cash),
-            "frozen_cash": float(account.frozen_cash),
+            "current_cash": current_cash,
+            "frozen_cash": 0.0,  # Not tracked - all data from Kraken
         },
-        "total_assets": positions_value + float(account.current_cash),
+        "total_assets": positions_value + current_cash,
         "positions_value": positions_value,
     }
     # enrich positions with latest price and market value
@@ -405,18 +525,18 @@ async def _send_snapshot(db: Session, account_id: int):
         "positions": enriched_positions,
         "orders": [
             {
-                "id": o.id,
-                "order_no": o.order_no,
-                "user_id": o.account_id,
-                "symbol": o.symbol,
-                "name": o.name,
-                "market": o.market,
-                "side": o.side,
-                "order_type": o.order_type,
-                "price": float(o.price) if o.price is not None else None,
-                "quantity": float(o.quantity),
-                "filled_quantity": float(o.filled_quantity),
-                "status": o.status,
+                "id": o["id"],
+                "order_no": o["order_no"],
+                "user_id": o["account_id"],
+                "symbol": o["symbol"],
+                "name": o["symbol"],  # Use symbol as name
+                "market": "CRYPTO",
+                "side": o["side"],
+                "order_type": o["order_type"],
+                "price": o["price"],
+                "quantity": o["quantity"],
+                "filled_quantity": 0.0,  # Not tracked for Kraken orders
+                "status": o["status"],
             }
             for o in orders[:20]
         ],
@@ -505,12 +625,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     username = msg.get("username", "default")
                     user = get_or_create_user(db, username)
                     
-                    # Get existing account for this user (from paper DB - metadata storage)
+                    # Get existing account for this user (from metadata DB)
+                    # Balance and positions are fetched from Kraken in real-time
                     account = get_or_create_default_account(
                         db,
                         user.id,
-                        account_name=f"{username} AI Trader",
-                        initial_capital=float(msg.get("initial_capital", 100000))
+                        account_name=f"{username} AI Trader"
                     )
 
                     if not account:
@@ -519,31 +639,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     else:
                         account_id = account.id
                         
-                        # Ensure account exists in target database based on trade_mode
-                        target_db = get_session_for_mode(account.trade_mode if account.trade_mode in ["real", "paper"] else "paper")
-                        try:
-                            # Check if account exists in target database
-                            existing = target_db.query(Account).filter(Account.id == account.id).first()
-                            if not existing:
-                                # Create account in target database
-                                new_account = Account(
-                                    id=account.id,
-                                    user_id=account.user_id,
-                                    name=account.name,
-                                    model=account.model,
-                                    base_url=account.base_url,
-                                    api_key=account.api_key,
-                                    trade_mode=account.trade_mode,
-                                    account_type=account.account_type,
-                                    initial_capital=account.initial_capital,
-                                    current_cash=account.current_cash if account.trade_mode == "paper" else account.initial_capital,
-                                    frozen_cash=Decimal('0'),
-                                    is_active=account.is_active,
-                                )
-                                target_db.add(new_account)
-                                target_db.commit()
-                        finally:
-                            target_db.close()
+                        # Account exists in metadata database - no need to create trading DB records
+                        # All trading data is fetched from Kraken in real-time
 
                     # Register the connection (handles None account_id gracefully)
                     manager.register(account_id, websocket)
@@ -551,17 +648,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Send bootstrap confirmation with account info
                     try:
                         if account:
-                            # Use account's trade_mode database for snapshot
-                            account_db = get_session_for_mode(account.trade_mode if account.trade_mode in ["real", "paper"] else "paper")
-                            try:
-                                await manager.send_to_account(account_id, {
-                                    "type": "bootstrap_ok",
-                                    "user": {"id": user.id, "username": user.username},
-                                    "account": {"id": account.id, "name": account.name, "user_id": account.user_id}
-                                })
-                                await _send_snapshot(account_db, account_id)
-                            finally:
-                                account_db.close()
+                            await manager.send_to_account(account_id, {
+                                "type": "bootstrap_ok",
+                                "user": {"id": user.id, "username": user.username},
+                                "account": {"id": account.id, "name": account.name, "user_id": account.user_id}
+                            })
+                            await _send_snapshot(db, account_id)
                         else:
                             # Send bootstrap with no account info
                             await websocket.send_text(json.dumps({
@@ -638,34 +730,21 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Register to new account
                     manager.register(account_id, websocket)
 
-                    # Use account's trade_mode database for snapshot
-                    account_db = get_session_for_mode(target_account.trade_mode if target_account.trade_mode in ["real", "paper"] else "paper")
-                    try:
-                        # Send confirmation and snapshot
-                        await manager.send_to_account(account_id, {
-                            "type": "account_switched",
-                            "account": {
-                                "id": target_account.id,
-                                "user_id": target_account.user_id,
-                                "name": target_account.name
-                            }
-                        })
-                        await _send_snapshot(account_db, account_id)
-                    finally:
-                        account_db.close()
+                    # Send confirmation and snapshot
+                    await manager.send_to_account(account_id, {
+                        "type": "account_switched",
+                        "account": {
+                            "id": target_account.id,
+                            "user_id": target_account.user_id,
+                            "name": target_account.name
+                        }
+                    })
+                    await _send_snapshot(db, account_id)
                 elif kind == "get_snapshot":
                     if account_id is not None:
-                        # Get account from paper DB to check trade_mode
                         account = get_account(db, account_id)
                         if account:
-                            # Use account's trade_mode database
-                            account_db = get_session_for_mode(account.trade_mode if account.trade_mode in ["real", "paper"] else "paper")
-                            try:
-                                await _send_snapshot(account_db, account_id)
-                            finally:
-                                account_db.close()
-                        else:
-                            await _send_snapshot(db, account_id)  # Fallback to paper DB
+                            await _send_snapshot(db, account_id)
                 elif kind == "get_asset_curve":
                     # Get asset curve data with specific timeframe
                     timeframe = msg.get("timeframe", "1h")
@@ -685,15 +764,21 @@ async def websocket_endpoint(websocket: WebSocket):
                         continue
 
                     try:
-                        # Get account and user object
-                        account = get_account(db, account_id)
-                        if not account:
+                        # Get account metadata from paper DB
+                        account_meta = get_account(db, account_id)
+                        if not account_meta:
                             await websocket.send_text(json.dumps({"type": "error", "message": "account not found"}))
                             continue
 
-                        user = get_user(db, account.user_id)
+                        user = get_user(db, account_meta.user_id)
                         if not user:
                             await websocket.send_text(json.dumps({"type": "error", "message": "user not found"}))
+                            continue
+
+                        # Get account metadata from metadata database
+                        account = get_account(db, account_id)
+                        if not account:
+                            await websocket.send_text(json.dumps({"type": "error", "message": "account not found"}))
                             continue
 
                         # Extract order parameters
@@ -717,23 +802,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             await websocket.send_text(json.dumps({"type": "error", "message": "invalid quantity"}))
                             continue
 
-                        # Create the order
-                        order = create_order(
-                            db=db,
-                            account=account,
-                            symbol=symbol,
-                            name=name,
-                            side=side,
-                            order_type=order_type,
-                            price=price,
-                            quantity=quantity
-                        )
-
-                        # Commit the order
-                        db.commit()
-
-                        # Send success response
-                        await manager.send_to_account(account_id, {"type": "order_pending", "order_id": order.id})
+                        # Orders are placed directly on Kraken (via trading_commands.py)
+                        # This endpoint is deprecated for real trading - orders should go through Kraken API
+                        await websocket.send_text(json.dumps({
+                            "type": "error", 
+                            "message": "Orders are placed directly on Kraken. Use the trading API instead."
+                        }))
 
                         # Send updated snapshot
                         await _send_snapshot(db, account_id)

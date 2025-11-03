@@ -9,7 +9,8 @@ class AccountCreate(BaseModel):
     model: str = "gpt-4-turbo"
     base_url: str = "https://api.openai.com/v1"
     api_key: str
-    initial_capital: float = 10000.0
+    kraken_api_key: Optional[str] = None
+    kraken_private_key: Optional[str] = None
     account_type: str = "AI"  # "AI" or "MANUAL"
 
 
@@ -19,7 +20,8 @@ class AccountUpdate(BaseModel):
     model: Optional[str] = None
     base_url: Optional[str] = None
     api_key: Optional[str] = None
-    trade_mode: Optional[str] = None  # "real" for Kraken real trading, "paper" for paper trading
+    kraken_api_key: Optional[str] = None
+    kraken_private_key: Optional[str] = None
 
 
 class AccountOut(BaseModel):
@@ -27,15 +29,17 @@ class AccountOut(BaseModel):
     id: int
     user_id: int
     name: str
-    model: str
-    base_url: str
-    api_key: str  # Will be masked in API responses
-    initial_capital: float
-    current_cash: float
-    frozen_cash: float
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None  # Will be masked in API responses
+    kraken_api_key: Optional[str] = None  # Will be masked in API responses
+    kraken_private_key: Optional[str] = None  # Will be masked in API responses
     account_type: str
     is_active: bool
-    trade_mode: str = "paper"  # "real" for Kraken real trading, "paper" for paper trading
+    # Balance fields - fetched from Kraken in real-time, included for API compatibility
+    initial_capital: float = 0.0  # Current balance from Kraken (used as baseline)
+    current_cash: float = 0.0  # Current balance from Kraken
+    frozen_cash: float = 0.0  # Always 0 - not tracked
 
     class Config:
         from_attributes = True

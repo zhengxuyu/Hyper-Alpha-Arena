@@ -2,7 +2,7 @@
 System Log Collector Service
 实时收集系统日志：价格更新、AI决策、错误异常
 """
-
+import sys
 import json
 import logging
 import threading
@@ -223,7 +223,15 @@ class SystemLogHandler(logging.Handler):
                 )
         except Exception as e:
             # 避免日志处理器本身出错
-            print(f"SystemLogHandler error: {e}")
+            # 使用标准库logging记录错误，避免循环依赖
+            try:
+                # 尝试使用备用logger
+                fallback_logger = logging.getLogger('system_logger_fallback')
+                fallback_logger.error(f"SystemLogHandler error: {e}", exc_info=True)
+            except Exception:
+                # 如果logger也失败，至少写入stderr
+                sys.stderr.write(f"SystemLogHandler error: {e}\n")
+                sys.stderr.flush()
 
 
 class PriceSnapshotLogger:

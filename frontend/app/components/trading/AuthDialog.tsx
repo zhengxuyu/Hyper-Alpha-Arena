@@ -36,12 +36,12 @@ export default function AuthDialog({
 
   const handleConfirmTrade = () => {
     if (!pendingTrade) return
-    
-    // For paper trading, just confirm the trade without authentication
-    toast.success('Trade confirmed - Paper Trading Mode')
-    
-    // Use a dummy session token for paper trading
-    const dummySessionToken = 'paper-trading-session'
+
+    // Trades are executed directly on Kraken
+    toast.success('Trade confirmed - Executing on Kraken')
+
+    // Use a dummy session token (real trades go through Kraken API)
+    const dummySessionToken = 'kraken-real-trading'
     const finalOrderData = {
       ...orderData,
       session_token: dummySessionToken
@@ -59,7 +59,7 @@ export default function AuthDialog({
         <h3 className="text-lg font-semibold mb-4">
           Confirm Trade - {pendingTrade?.side === 'BUY' ? 'Buy' : 'Sell'}
         </h3>
-        
+
         <div className="space-y-4">
           <div className="text-xs text-muted-foreground">
             <p><strong>Symbol:</strong> {orderData.symbol}</p>
@@ -68,9 +68,9 @@ export default function AuthDialog({
             {orderData.price && <p><strong>Price:</strong> ${orderData.price}</p>}
           </div>
 
-          <div className="bg-blue-50 dark:bg-blue-950 p-3 rounded">
-            <p className="text-xs text-blue-700 dark:text-blue-300">
-              📄 Paper Trading Mode - No real money involved
+          <div className="bg-yellow-50 dark:bg-yellow-950 p-3 rounded">
+            <p className="text-xs text-yellow-700 dark:text-yellow-300">
+              ⚠️ Real Trading Mode - Trades will be executed on Kraken with real funds
             </p>
           </div>
 

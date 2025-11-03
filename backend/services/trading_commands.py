@@ -3,12 +3,10 @@ Trading Commands Service - Handles order execution and trading logic
 """
 import logging
 import random
-import sys
-import os
 from decimal import Decimal
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from database.connection import SessionLocal, get_session_for_mode
+from database.connection import SessionLocal
 from database.models import (CRYPTO_COMMISSION_RATE, CRYPTO_MIN_COMMISSION,
                              Account, Position)
 from services.ai_decision_service import (SUPPORTED_SYMBOLS,
@@ -18,73 +16,49 @@ from services.ai_decision_service import (SUPPORTED_SYMBOLS,
                                           save_ai_decision)
 from services.asset_calculator import calc_positions_value
 from services.market_data import get_last_price
+from services.broker_adapter import execute_order, get_balance, get_positions
 from services.order_matching import check_and_execute_order, create_order
 from sqlalchemy.orm import Session
 
-# Add kraken module to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-try:
-    from kraken.trade import add_order as kraken_add_order, map_token
-    KRAKEN_AVAILABLE = True
-except ImportError:
-    KRAKEN_AVAILABLE = False
-    kraken_add_order = None
-    map_token = None
 
 logger = logging.getLogger(__name__)
 
 AI_TRADING_SYMBOLS: List[str] = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"]
 
+# Constants for trade verification and quantity calculation
+SLIPPAGE_TOLERANCE = 0.95  # 5% slippage tolerance for trade verification
+MIN_CRYPTO_QUANTITY = Decimal("0.000001")  # Minimum crypto quantity
+POSITION_FULLY_SOLD_THRESHOLD = Decimal("0.000001")  # Threshold for considering position fully sold
 
-def _map_symbol_to_kraken_pair(symbol: str) -> str:
-    """Map internal symbol to Kraken trading pair using token_map.yaml"""
-    if not KRAKEN_AVAILABLE:
-        return f"{symbol}USD"
-    return map_token(symbol.upper())
+# Constants for API rate limiting and caching
+CACHE_TTL_SECONDS = 5.0  # Cache TTL for balance and positions (seconds)
+RATE_LIMIT_INTERVAL_SECONDS = 10.0  # Minimum interval between Kraken API calls (seconds)
+POSITION_SYNC_THRESHOLD = 0.001  # Threshold for position quantity difference to trigger sync
 
 
-def _execute_real_trade(symbol: str, side: str, quantity: float, price: float) -> Tuple[bool, Optional[str]]:
+def _execute_real_trade(account, symbol: str, side: str, quantity: float, price: float) -> Tuple[bool, Optional[str]]:
     """
-    Execute real trade on Kraken
+    Execute real trade using broker interface.
+    
+    Args:
+        account: Account object with broker API credentials
+        symbol: Trading symbol
+        side: Order side ("BUY" or "SELL")
+        quantity: Order quantity
+        price: Order price
     
     Returns:
-        Tuple[bool, Optional[str]]: (success, error_message or kraken_txid)
+        Tuple[bool, Optional[str]]: (success, error_message or order_id)
     """
-    if not KRAKEN_AVAILABLE:
-        return False, "Kraken module not available"
-    
-    try:
-        pair = _map_symbol_to_kraken_pair(symbol)
-        order_type = side.lower()  # "buy" or "sell"
-        ordertype = "market"
-        
-        # For market orders, we still need to provide a price reference
-        # Kraken may use current market price, but price parameter is required
-        result = kraken_add_order(
-            pair=pair,
-            type=order_type,
-            ordertype=ordertype,
-            volume=quantity,
-            price=price,  # Reference price for market order
-        )
-        
-        if result.get("error"):
-            error_msg = result.get("error", ["Unknown error"])[0] if isinstance(result.get("error"), list) else str(result.get("error"))
-            logger.error(f"Kraken API error: {error_msg}")
-            return False, error_msg
-        
-        txid = result.get("result", {}).get("txid", [])
-        if txid:
-            txid_str = txid[0] if isinstance(txid, list) else str(txid)
-            logger.info(f"Kraken order placed successfully: txid={txid_str}, pair={pair}, type={order_type}, volume={quantity}")
-            return True, txid_str
-        else:
-            logger.warning(f"Kraken order response missing txid: {result}")
-            return False, "Missing transaction ID in response"
-            
-    except Exception as e:
-        logger.error(f"Failed to execute real trade on Kraken: {e}", exc_info=True)
-        return False, str(e)
+    success, result, _ = execute_order(
+        account=account,
+        symbol=symbol,
+        side=side,
+        quantity=quantity,
+        price=price,
+        ordertype="market"
+    )
+    return success, result
 
 
 def _estimate_buy_cash_needed(price: float, quantity: float) -> Decimal:
@@ -110,6 +84,246 @@ def _get_market_prices(symbols: List[str]) -> Dict[str, float]:
     return prices
 
 
+def get_account_balance_safe(account: Account, context: str = "") -> float:
+    """
+    Safely get account balance with error handling.
+    Extracted to reduce code duplication (Duplicate Code smell fix).
+    
+    Args:
+        account: Account object
+        context: Context string for logging (e.g., "creating order", "executing trade")
+    
+    Returns:
+        Account balance as float, or 0.0 if retrieval fails
+    """
+    try:
+        balance = get_balance(account)
+        current_cash = float(balance) if balance is not None else 0.0
+    except (ConnectionError, TimeoutError, ValueError) as e:
+        logger.warning(f"Failed to get balance for {account.name} {context}: {e}")
+        current_cash = 0.0
+    except Exception as e:
+        logger.error(f"Unexpected error getting balance for {account.name} {context}: {e}", exc_info=True)
+        current_cash = 0.0
+    return current_cash
+
+
+def find_position_by_symbol(positions: List[Dict], symbol: str) -> Optional[Dict]:
+    """
+    Find position by symbol (case-insensitive).
+    Extracted to reduce code duplication (Duplicate Code smell fix).
+    
+    Args:
+        positions: List of position dictionaries
+        symbol: Symbol to search for
+    
+    Returns:
+        Position dictionary if found, None otherwise
+    """
+    for pos in positions:
+        symbol_key = pos.get("symbol", "").upper()
+        if symbol_key == symbol.upper():
+            return pos
+    return None
+
+
+def _validate_ai_decision(decision: Dict, account_name: str) -> Optional[Tuple[str, str, float, str]]:
+    """
+    Validate AI decision structure and extract fields.
+    Extracted from place_ai_driven_crypto_order to reduce method length (Long Method smell fix).
+    
+    Args:
+        decision: AI decision dictionary
+        account_name: Account name for logging
+    
+    Returns:
+        Tuple of (operation, symbol, target_portion, reason) if valid, None otherwise
+    """
+    if not decision or not isinstance(decision, dict):
+        logger.warning(f"Failed to get AI decision for {account_name}, skipping")
+        return None
+    
+    operation = decision.get("operation", "").lower() if decision.get("operation") else ""
+    symbol = decision.get("symbol", "").upper() if decision.get("symbol") else ""
+    target_portion = float(decision.get("target_portion_of_balance", 0)) if decision.get("target_portion_of_balance") is not None else 0
+    reason = decision.get("reason", "No reason provided")
+    
+    if operation not in ["buy", "sell", "hold"]:
+        logger.warning(f"Invalid operation '{operation}' from AI for {account_name}, skipping")
+        return None
+    
+    if operation == "hold":
+        logger.info(f"AI decided to HOLD for {account_name}")
+        return ("hold", symbol, target_portion, reason)
+    
+    if symbol not in SUPPORTED_SYMBOLS:
+        logger.warning(f"Invalid symbol '{symbol}' from AI for {account_name}, skipping")
+        return None
+    
+    if target_portion <= 0 or target_portion > 1:
+        logger.warning(f"Invalid target_portion {target_portion} from AI for {account_name}, skipping")
+        return None
+    
+    return (operation, symbol, target_portion, reason)
+
+
+def _calculate_buy_quantity(account: Account, symbol: str, price: float, target_portion: float, available_cash_dec: Decimal) -> Optional[float]:
+    """
+    Calculate buy quantity based on available cash and target portion.
+    Extracted from place_ai_driven_crypto_order to reduce method length (Long Method smell fix).
+    
+    Args:
+        account: Account object
+        symbol: Trading symbol
+        price: Current price
+        target_portion: Target portion of balance to use
+        available_cash_dec: Available cash as Decimal
+    
+    Returns:
+        Calculated quantity as float, or None if calculation fails
+    """
+    # Calculate quantity based on available cash and target portion
+    # Keep calculations in Decimal for precision
+    order_value = available_cash_dec * Decimal(str(target_portion))
+    quantity_decimal = order_value / Decimal(str(price))
+    # Convert to float for final use, round to 6 decimal places for crypto
+    quantity = round(float(quantity_decimal), 6)
+    # Ensure minimum quantity if original was positive
+    if quantity <= 0 and quantity_decimal > 0:
+        quantity = float(MIN_CRYPTO_QUANTITY)
+    
+    if quantity <= 0:
+        logger.info(f"Calculated BUY quantity <= 0 for {symbol} for {account.name}, skipping")
+        return None
+    
+    cash_needed = _estimate_buy_cash_needed(price, quantity)
+    if available_cash_dec < cash_needed:
+        logger.info(
+            "Skipping BUY for %s due to insufficient cash after fees: need $%.2f, current cash $%.2f",
+            account.name,
+            float(cash_needed),
+            float(available_cash_dec),
+        )
+        return None
+    
+    return quantity
+
+
+def _calculate_sell_quantity(account: Account, symbol: str, positions: List[Dict], target_portion: float) -> Optional[Tuple[float, float]]:
+    """
+    Calculate sell quantity based on available position and target portion.
+    Extracted from place_ai_driven_crypto_order to reduce method length (Long Method smell fix).
+    
+    Args:
+        account: Account object
+        symbol: Trading symbol
+        positions: List of position dictionaries
+        target_portion: Target portion of position to sell
+    
+    Returns:
+        Tuple of (quantity, available_quantity) if valid, None otherwise
+    """
+    # Find position for this symbol
+    position = find_position_by_symbol(positions, symbol)
+    
+    if not position:
+        logger.info(f"No position available to SELL for {symbol} for {account.name}, skipping")
+        return None
+    
+    try:
+        available_qty_value = position.get("available_quantity", 0)
+        available_quantity = float(available_qty_value) if available_qty_value else 0.0
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Invalid available_quantity type for position {symbol}: {e}")
+        available_quantity = 0.0
+    
+    if available_quantity <= 0:
+        logger.info(f"No position available to SELL for {symbol} for {account.name}, skipping")
+        return None
+    
+    quantity = max(float(MIN_CRYPTO_QUANTITY), available_quantity * target_portion)
+    
+    if quantity > available_quantity:
+        quantity = available_quantity
+    
+    return (quantity, available_quantity)
+
+
+def _verify_trade_execution(account: Account, symbol: str, side: str, quantity: float, previous_quantity: Optional[float], kraken_txid: Optional[str]) -> None:
+    """
+    Verify trade execution by checking broker positions.
+    Extracted to reduce code duplication (Duplicate Code smell fix).
+    
+    Args:
+        account: Account object
+        symbol: Trading symbol
+        side: Order side ("BUY" or "SELL")
+        quantity: Trade quantity
+        previous_quantity: Previous position quantity (for SELL verification)
+        kraken_txid: Kraken transaction ID for logging
+    """
+    try:
+        positions_after = get_positions(account)
+        position = find_position_by_symbol(positions_after, symbol)
+        
+        if side == "BUY":
+            # Verify: check if we actually have the position now
+            if position:
+                try:
+                    pos_qty = float(position.get("quantity", 0))
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid quantity type in position verification for {symbol}")
+                    pos_qty = 0
+                
+                if pos_qty >= quantity * SLIPPAGE_TOLERANCE:  # Allow 5% tolerance for slippage
+                    logger.debug(f"Trade verified: position {symbol} quantity={pos_qty}")
+                else:
+                    logger.warning(
+                        f"Trade verification failed: {symbol} position found but quantity={pos_qty} < expected={quantity * SLIPPAGE_TOLERANCE}. "
+                        f"Kraken txid={kraken_txid}. This may indicate a partial fill."
+                    )
+            else:
+                logger.warning(
+                    f"Trade verification failed: {symbol} position not found after BUY. "
+                    f"Kraken txid={kraken_txid}. This may indicate a partial fill or order failure."
+                )
+        elif side == "SELL":
+            # Verify: check if position was reduced
+            if position:
+                try:
+                    pos_qty = float(position.get("quantity", 0))
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid quantity type in position verification for {symbol}")
+                    pos_qty = 0
+                
+                if previous_quantity is not None:
+                    expected_qty = previous_quantity - quantity
+                    # Allow some tolerance for rounding/slippage
+                    if pos_qty > expected_qty + quantity * (1 - SLIPPAGE_TOLERANCE):
+                        logger.warning(
+                            f"Trade verification warning: {symbol} position={pos_qty}, "
+                            f"expected={expected_qty}. Kraken txid={kraken_txid}"
+                        )
+                    else:
+                        logger.debug(f"Trade verified: position {symbol} reduced to {pos_qty}")
+            else:
+                # If position not found and we sold all, that's expected and successful
+                if previous_quantity is not None:
+                    remaining_after_sell = previous_quantity - quantity
+                    if remaining_after_sell <= float(POSITION_FULLY_SOLD_THRESHOLD):
+                        logger.debug(f"Position {symbol} fully sold, verification successful")
+                    else:
+                        logger.warning(
+                            f"Position {symbol} not found after SELL but expected remaining={remaining_after_sell}. "
+                            f"Kraken txid={kraken_txid}"
+                        )
+    except Exception as verify_err:
+        # Don't fail the trade if verification fails, but log it
+        logger.warning(
+            f"Failed to verify trade execution for {account.name} {side} {symbol}: {verify_err}"
+        )
+
+
 def _select_side(db: Session, account: Account, symbol: str, max_value: float) -> Optional[Tuple[str, int]]:
     """Select random trading side and quantity for legacy random trading"""
     market = "CRYPTO"
@@ -133,7 +347,10 @@ def _select_side(db: Session, account: Account, symbol: str, max_value: float) -
 
     choices = []
 
-    if float(account.current_cash) >= price and max_quantity_by_value >= 1:
+    # Get balance from broker in real-time (using extracted function)
+    current_cash = get_account_balance_safe(account, "selecting side")
+    
+    if current_cash >= price and max_quantity_by_value >= 1:
         choices.append(("BUY", max_quantity_by_value))
 
     if available_quantity > 0:
@@ -149,18 +366,17 @@ def _select_side(db: Session, account: Account, symbol: str, max_value: float) -
     return side, quantity
 
 
-def place_ai_driven_crypto_order(max_ratio: float = 0.2, account_ids: Optional[Iterable[int]] = None, trade_mode: str = "paper") -> None:
-    """Place crypto order based on AI model decision.
+def place_ai_driven_crypto_order(max_ratio: float = 0.2, account_ids: Optional[Iterable[int]] = None) -> None:
+    """Place crypto order based on AI model decision. Only real trading is supported.
 
     Args:
         max_ratio: maximum portion of portfolio to allocate per trade.
         account_ids: optional iterable of account IDs to process (defaults to all active accounts).
-        trade_mode: specify 'real' for real trading, 'paper' for paper trading.
     """
-    # Accounts are stored in paper database (for metadata)
-    paper_db = SessionLocal()
+    # Accounts are stored in metadata database
+    db = SessionLocal()
     try:
-        accounts = get_active_ai_accounts(paper_db)
+        accounts = get_active_ai_accounts(db)
         if not accounts:
             logger.debug("No available accounts, skipping AI trading")
             return
@@ -172,27 +388,18 @@ def place_ai_driven_crypto_order(max_ratio: float = 0.2, account_ids: Optional[I
                 logger.debug("No matching accounts for provided IDs: %s", account_ids)
                 return
 
-        if trade_mode not in ["real", "paper"]:
-            logger.warning(f"Invalid trade_mode '{trade_mode}' for AI trading, defaulting to 'paper'.")
-            trade_mode = "paper"
-
         # Get latest market prices once for all accounts
         prices = _get_market_prices(AI_TRADING_SYMBOLS)
         if not prices:
             logger.warning("Failed to fetch market prices, skipping AI trading")
             return
-
+        
         # Iterate through all active accounts
         for account in accounts:
-            # Get account's own trade_mode (each account can have different mode)
-            account_trade_mode = account.trade_mode if account.trade_mode in ["real", "paper"] else "paper"
-            if account_trade_mode != trade_mode:
-                logger.info(f"Account {account.name} has trade_mode={account_trade_mode}, but function called with trade_mode={trade_mode}. Using account's trade_mode.")
+            logger.info(f"Processing AI trading for account: {account.name}")
             
-            logger.info(f"Processing AI trading for account: {account.name} (mode: {account_trade_mode})")
-            
-            # Use database session for this account's trade_mode
-            account_db = get_session_for_mode(account_trade_mode)
+            # Use metadata database (trading data is fetched from Kraken in real-time)
+            account_db = db
             try:
                 # Get portfolio data for this account (from account's database)
                 portfolio = _get_portfolio_data(account_db, account)
@@ -201,42 +408,21 @@ def place_ai_driven_crypto_order(max_ratio: float = 0.2, account_ids: Optional[I
                     logger.debug(f"Account {account.name} has non-positive total assets, skipping")
                     continue
 
-                # Call AI for trading decision (uses paper_db for account metadata)
-                decision = call_ai_for_decision(paper_db, account, portfolio, prices)
-                if not decision or not isinstance(decision, dict):
-                    logger.warning(f"Failed to get AI decision for {account.name}, skipping")
-                    continue
-
-                operation = decision.get("operation", "").lower() if decision.get("operation") else ""
-                symbol = decision.get("symbol", "").upper() if decision.get("symbol") else ""
-                target_portion = float(decision.get("target_portion_of_balance", 0)) if decision.get("target_portion_of_balance") is not None else 0
-                reason = decision.get("reason", "No reason provided")
-
-                logger.info(f"AI decision for {account.name}: {operation} {symbol} (portion: {target_portion:.2%}) - {reason}")
-
-                # Validate decision
-                if operation not in ["buy", "sell", "hold"]:
-                    logger.warning(f"Invalid operation '{operation}' from AI for {account.name}, skipping")
-                    # Save invalid decision for debugging (use account's database)
+                # Call AI for trading decision (uses db for account metadata)
+                decision = call_ai_for_decision(db, account, portfolio, prices)
+                
+                # Validate and extract decision fields (extracted method)
+                decision_result = _validate_ai_decision(decision, account.name)
+                if decision_result is None:
                     save_ai_decision(account_db, account, decision, portfolio, executed=False)
                     continue
                 
+                operation, symbol, target_portion, reason = decision_result
+                logger.info(f"AI decision for {account.name}: {operation} {symbol} (portion: {target_portion:.2%}) - {reason}")
+                
                 if operation == "hold":
-                    logger.info(f"AI decided to HOLD for {account.name}")
                     # Save hold decision (use account's database)
                     save_ai_decision(account_db, account, decision, portfolio, executed=True)
-                    continue
-
-                if symbol not in SUPPORTED_SYMBOLS:
-                    logger.warning(f"Invalid symbol '{symbol}' from AI for {account.name}, skipping")
-                    # Save invalid decision for debugging (use account's database)
-                    save_ai_decision(account_db, account, decision, portfolio, executed=False)
-                    continue
-
-                if target_portion <= 0 or target_portion > 1:
-                    logger.warning(f"Invalid target_portion {target_portion} from AI for {account.name}, skipping")
-                    # Save invalid decision for debugging (use account's database)
-                    save_ai_decision(account_db, account, decision, portfolio, executed=False)
                     continue
 
                 # Get current price
@@ -247,169 +433,90 @@ def place_ai_driven_crypto_order(max_ratio: float = 0.2, account_ids: Optional[I
                     save_ai_decision(account_db, account, decision, portfolio, executed=False)
                     continue
 
-                # Calculate quantity based on operation
+                # Calculate quantity based on operation (extracted methods)
+                quantity = None
+                side = None
+                available_quantity = None
+                
                 if operation == "buy":
-                    # Get account from account's database to get current cash
-                    account_in_db = account_db.query(Account).filter(Account.id == account.id).first()
-                    if not account_in_db:
-                        logger.warning(f"Account {account.name} not found in {account_trade_mode} database, skipping")
+                    # Get current cash from broker in real-time
+                    balance = get_balance(account)
+                    if balance is None:
+                        logger.warning(f"Failed to get balance from Kraken for {account.name}, skipping")
                         save_ai_decision(account_db, account, decision, portfolio, executed=False)
                         continue
                     
-                    # Calculate quantity based on available cash and target portion
-                    available_cash = float(account_in_db.current_cash)
-                    available_cash_dec = Decimal(str(account_in_db.current_cash))
-                    order_value = available_cash * target_portion
-                    # For crypto, support fractional quantities - use float instead of int
-                    quantity = float(Decimal(str(order_value)) / Decimal(str(price)))
-                    
-                    # Round to reasonable precision (6 decimal places for crypto)
-                    quantity = round(quantity, 6)
-                    
-                    if quantity <= 0:
-                        logger.info(f"Calculated BUY quantity <= 0 for {symbol} for {account.name}, skipping")
-                        # Save decision with execution failure
-                        save_ai_decision(account_db, account, decision, portfolio, executed=False)
-                        continue
-
-                    cash_needed = _estimate_buy_cash_needed(price, quantity)
-                    if available_cash_dec < cash_needed:
-                        logger.info(
-                            "Skipping BUY for %s due to insufficient cash after fees: need $%.2f, current cash $%.2f",
-                            account.name,
-                            float(cash_needed),
-                            float(available_cash_dec),
-                        )
+                    # Calculate buy quantity (extracted method)
+                    quantity = _calculate_buy_quantity(account, symbol, price, target_portion, balance)
+                    if quantity is None:
                         save_ai_decision(account_db, account, decision, portfolio, executed=False)
                         continue
                     
                     side = "BUY"
 
                 elif operation == "sell":
-                    # Calculate quantity based on position and target portion (from account's database)
-                    position = (
-                        account_db.query(Position)
-                        .filter(Position.account_id == account.id, Position.symbol == symbol, Position.market == "CRYPTO")
-                        .first()
-                    )
+                    # Get positions from broker in real-time
+                    positions = get_positions(account)
                     
-                    if not position or float(position.available_quantity) <= 0:
-                        logger.info(f"No position available to SELL for {symbol} for {account.name}, skipping")
-                        # Save decision with execution failure
+                    # Calculate sell quantity (extracted method)
+                    result = _calculate_sell_quantity(account, symbol, positions, target_portion)
+                    if result is None:
                         save_ai_decision(account_db, account, decision, portfolio, executed=False)
                         continue
                     
-                    available_quantity = int(position.available_quantity)
-                    quantity = max(1, int(available_quantity * target_portion))
-                    
-                    if quantity > available_quantity:
-                        quantity = available_quantity
-                    
+                    quantity, available_quantity = result
                     side = "SELL"
-                
                 else:
                     continue
 
-                # Create and execute order (in account's database)
-                name = SUPPORTED_SYMBOLS[symbol]
-                
-                # Get account from account's database for order creation
-                account_in_db = account_db.query(Account).filter(Account.id == account.id).first()
-                if not account_in_db:
-                    logger.warning(f"Account {account.name} not found in {account_trade_mode} database, skipping")
-                    save_ai_decision(account_db, account, decision, portfolio, executed=False)
-                    continue
-                
-                try:
-                    order = create_order(
-                        db=account_db,
-                        account=account_in_db,
-                        symbol=symbol,
-                        name=name,
-                        side=side,
-                        order_type="MARKET",
-                        price=None,
-                        quantity=quantity,
-                    )
-                except ValueError as create_err:
-                    message = str(create_err)
-                    if "Insufficient cash" in message or "Insufficient positions" in message:
-                        logger.info(
-                            "Skipping order for %s (%s %s): %s",
-                            account.name,
-                            side,
-                            symbol,
-                            message,
-                        )
-                        account_db.rollback()
-                        save_ai_decision(account_db, account, decision, portfolio, executed=False)
-                        continue
-                    # Unexpected validation error - re-raise
-                    raise
-
-                account_db.commit()
-                account_db.refresh(order)
-
-                # Execute trade based on account's trade_mode
+                # Execute real trade directly on Kraken (no database order creation needed)
+                # All trading data is fetched from Kraken in real-time
                 executed = False
                 kraken_txid = None
                 
-                if account_trade_mode == "real":
-                    # Execute real trade on Kraken
-                    logger.info(f"Executing REAL trade for {account.name}: {side} {quantity} {symbol} @ {price}")
-                    executed, kraken_txid = _execute_real_trade(symbol, side, quantity, price)
-                    
-                    if executed:
-                        # After successful Kraken trade, update database order status
-                        # Mark as executed in our system
-                        order.status = "FILLED"
-                        order.filled_quantity = float(quantity)
-                        # Store Kraken transaction ID if we have a field for it
-                        # For now, just log it
-                        logger.info(
-                            f"REAL trade executed on Kraken: account={account.name} {side} {symbol} "
-                            f"quantity={quantity} txid={kraken_txid} order_no={order.order_no}"
-                        )
-                        account_db.commit()
-                    else:
-                        logger.warning(
-                            f"REAL trade failed on Kraken: account={account.name} {side} {symbol} "
-                            f"quantity={quantity} error={kraken_txid}"
-                        )
-                        # Mark order as failed or keep as pending based on your business logic
-                        order.status = "FAILED"
-                        account_db.commit()
+                # Execute real trade on Kraken
+                if not account.kraken_api_key or not account.kraken_private_key:
+                    logger.warning(f"Account {account.name} does not have Kraken API keys configured, skipping trade")
+                    executed = False
+                    kraken_txid = "Missing API keys"
                 else:
-                    # Execute paper trade (simulated)
-                    logger.info(f"Executing PAPER trade for {account.name}: {side} {quantity} {symbol} @ {price}")
-                    executed = check_and_execute_order(account_db, order)
-                    if executed:
-                        account_db.refresh(order)
-                        logger.info(
-                            f"AI PAPER order executed: account={account.name} {side} {symbol} {order.order_no} "
-                            f"quantity={quantity} reason='{reason}'"
-                        )
-                    else:
-                        logger.info(
-                            f"AI PAPER order created but not executed: account={account.name} {side} {symbol} "
-                            f"quantity={quantity} order_id={order.order_no} reason='{reason}'"
-                        )
-
-                # Save decision with final execution status (use account's database)
-                save_ai_decision(account_db, account, decision, portfolio, executed=executed, order_id=order.id)
+                    logger.info(f"Executing REAL trade for {account.name}: {side} {quantity} {symbol} @ {price}")
+                    executed, kraken_txid = _execute_real_trade(
+                        account=account,
+                        symbol=symbol,
+                        side=side,
+                        quantity=quantity,
+                        price=price
+                    )
+                
+                if executed:
+                    logger.info(
+                        f"REAL trade executed on Kraken: account={account.name} {side} {symbol} "
+                        f"quantity={quantity} txid={kraken_txid}"
+                    )
+                    
+                    # Verify trade execution (extracted method)
+                    _verify_trade_execution(account, symbol, side, quantity, available_quantity, kraken_txid)
+                    
+                    # Save successful decision
+                    save_ai_decision(account_db, account, decision, portfolio, executed=True)
+                else:
+                    logger.warning(
+                        f"REAL trade failed on Kraken: account={account.name} {side} {symbol} "
+                        f"quantity={quantity} error={kraken_txid}"
+                    )
+                    # Save failed decision
+                    save_ai_decision(account_db, account, decision, portfolio, executed=False)
 
             except Exception as account_err:
                 logger.error(f"AI-driven order placement failed for account {account.name}: {account_err}", exc_info=True)
-                account_db.rollback()
                 # Continue with next account even if one fails
-            finally:
-                account_db.close()
+                continue
 
     except Exception as err:
         logger.error(f"AI-driven order placement failed: {err}", exc_info=True)
-        paper_db.rollback()
     finally:
-        paper_db.close()
+        db.close()
 
 
 def place_random_crypto_order(max_ratio: float = 0.2) -> None:
@@ -425,7 +532,9 @@ def place_random_crypto_order(max_ratio: float = 0.2) -> None:
         account = random.choice(accounts)
 
         positions_value = calc_positions_value(db, account.id)
-        total_assets = positions_value + float(account.current_cash)
+        # Get balance from broker in real-time (using extracted function)
+        current_cash = get_account_balance_safe(account, "placing random order")
+        total_assets = positions_value + current_cash
 
         if total_assets <= 0:
             logger.debug("Account %s total assets non-positive, skipping auto order placement", account.name)

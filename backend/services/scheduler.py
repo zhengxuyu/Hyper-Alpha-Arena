@@ -3,6 +3,7 @@ Scheduled task scheduler service
 Used to manage WebSocket snapshot updates and other scheduled tasks
 """
 
+import asyncio
 import logging
 from datetime import date, datetime
 from typing import Callable, Dict, List, Optional, Set
@@ -11,10 +12,17 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from database.connection import SessionLocal
 from database.models import CryptoPrice, Position
+from services.market_data import get_last_price
+from services.trading_commands import AI_TRADING_SYMBOLS, place_ai_driven_crypto_order
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
+
+# Dynamic imports for modules that may cause circular dependencies
+# These are imported inside functions to avoid import-time circular dependencies
+# Note: api.ws imports scheduler, so we import it dynamically
+# Note: services.auto_trader may have circular dependencies
 
 
 class TaskScheduler:
@@ -44,13 +52,13 @@ class TaskScheduler:
         """Check if scheduler is running"""
         return self._started and self.scheduler and self.scheduler.running
     
-    def add_account_snapshot_task(self, account_id: int, interval_seconds: int = 10):
+    def add_account_snapshot_task(self, account_id: int, interval_seconds: int = 30):
         """
         Add snapshot update task for account
 
         Args:
             account_id: Account ID
-            interval_seconds: Update interval (seconds), default 10 seconds
+            interval_seconds: Update interval (seconds), default 30 seconds (reduced to avoid Kraken API rate limits)
         """
         if not self.is_running():
             self.start()
@@ -223,7 +231,6 @@ class TaskScheduler:
                         continue
 
                     # Get latest price
-                    from services.market_data import get_last_price
                     current_price = get_last_price(position.symbol, position.market)
 
                     # Save price record
@@ -253,6 +260,20 @@ class TaskScheduler:
 task_scheduler = TaskScheduler()
 
 
+def sync_positions_task():
+    """
+    Scheduled task to sync database positions with Kraken.
+    This ensures data consistency between our database and Kraken actual positions.
+    Should run every 10-15 minutes to avoid excessive API calls.
+    """
+    try:
+        from services.position_sync import sync_all_active_accounts_positions
+        stats = sync_all_active_accounts_positions()
+        logger.debug(f"Position sync task completed: {stats}")
+    except Exception as e:
+        logger.error(f"Position sync task failed: {e}", exc_info=True)
+
+
 # Convenience functions
 def start_scheduler():
     """Start global scheduler"""
@@ -264,7 +285,7 @@ def stop_scheduler():
     task_scheduler.shutdown()
 
 
-def add_account_snapshot_job(account_id: int, interval_seconds: int = 10):
+def add_account_snapshot_job(account_id: int, interval_seconds: int = 30):
     """Convenience function to add snapshot task for account"""
     task_scheduler.add_account_snapshot_task(account_id, interval_seconds)
 
@@ -275,7 +296,7 @@ def remove_account_snapshot_job(account_id: int):
 
 
 # Legacy compatibility functions
-def add_user_snapshot_job(user_id: int, interval_seconds: int = 10):
+def add_user_snapshot_job(user_id: int, interval_seconds: int = 30):
     """Legacy function - now redirects to account-based function"""
     # For backward compatibility, assume this is account_id
     add_account_snapshot_job(user_id, interval_seconds)
@@ -296,9 +317,6 @@ def setup_market_tasks():
 def _ensure_market_data_ready() -> None:
     """Prefetch required market data before enabling trading tasks"""
     try:
-        from services.market_data import get_last_price
-        from services.trading_commands import AI_TRADING_SYMBOLS
-
         missing_symbols: List[str] = []
 
         for symbol in AI_TRADING_SYMBOLS:
@@ -326,9 +344,9 @@ def _ensure_market_data_ready() -> None:
 def reset_auto_trading_job():
     """Reset the auto trading job after account configuration changes"""
     try:
-        # Import constants from auto_trader module
+        # Dynamic import to avoid potential circular dependency
+        # services.auto_trader may import scheduler
         from services.auto_trader import AI_TRADE_JOB_ID
-        from services.trading_commands import place_ai_driven_crypto_order
 
         # Define interval (5 minutes)
         AI_TRADE_INTERVAL_SECONDS = 300
@@ -348,7 +366,7 @@ def reset_auto_trading_job():
         
         # Re-add the auto trading job with updated configuration
         task_scheduler.add_interval_task(
-            task_func=lambda: place_ai_driven_crypto_order(max_ratio=0.2),
+            task_func=lambda: place_ai_driven_crypto_order(max_ratio=0.2),  # Uses imported function from top
             interval_seconds=AI_TRADE_INTERVAL_SECONDS,
             task_id=AI_TRADE_JOB_ID
         )
@@ -362,8 +380,7 @@ def reset_auto_trading_job():
 
 def start_asset_curve_broadcast():
     """Start asset curve broadcast task - broadcasts every 60 seconds"""
-    import asyncio
-
+    # Dynamic import to avoid circular dependency (api.ws imports scheduler)
     from api.ws import broadcast_asset_curve_update
 
     def broadcast_all_timeframes():

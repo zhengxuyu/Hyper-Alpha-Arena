@@ -61,7 +61,7 @@ interface Order { id: number; order_no: string; symbol: string; name: string; ma
 interface Trade { id: number; order_id: number; account_id: number; symbol: string; name: string; market: string; side: string; price: number; quantity: number; commission: number; trade_time: string }
 
 const PAGE_TITLES: Record<string, string> = {
-  portfolio: 'Crypto Paper Trading',
+  portfolio: 'Crypto Trading',
   comprehensive: 'Hyper Alpha Arena',
   'system-logs': 'System Logs',
   'prompt-management': 'Prompt Templates',
@@ -104,7 +104,7 @@ function App() {
 
         const handleOpen = () => {
           console.log('WebSocket connected')
-          // Start with hardcoded default user for paper trading
+          // Start with default user
           ws!.send(JSON.stringify({ type: 'bootstrap', username: 'default', initial_capital: 10000 }))
         }
 
@@ -370,17 +370,7 @@ function App() {
         onAccountUpdated={handleAccountUpdated}
       />
       <div className="flex-1 flex flex-col">
-        <Header
-          title={pageTitle}
-          onTradeModeChanged={() => {
-            // Refresh WebSocket data
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ type: 'get_snapshot' }))
-            }
-            // Refresh accounts
-            setAccountRefreshTrigger(prev => prev + 1)
-          }}
-        />
+        <Header title={pageTitle} />
         {renderMainContent()}
       </div>
     </div>

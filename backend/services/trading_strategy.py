@@ -18,6 +18,7 @@ from repositories.strategy_repo import (get_strategy_by_account,
 from services.market_events import (subscribe_price_updates,
                                     unsubscribe_price_updates)
 from services.market_stream import start_market_stream
+from services.system_logger import system_logger
 from services.trading_commands import (AI_TRADING_SYMBOLS,
                                        place_ai_driven_crypto_order)
 
@@ -165,7 +166,6 @@ class StrategyManager:
             session.close()
 
     def handle_price_update(self, event: Dict[str, Any]) -> None:
-        from services.system_logger import system_logger
 
         symbol = event.get("symbol", "UNKNOWN")
         price = event.get("price", 0)
@@ -216,7 +216,6 @@ class StrategyManager:
             self._trigger_account(state, event_time)
 
     def _trigger_account(self, state: StrategyState, event_time: datetime) -> None:
-        from services.system_logger import system_logger
 
         if not state.enabled:
             state.tick_counter = 0
@@ -244,18 +243,9 @@ class StrategyManager:
                 details={"account_id": state.account_id}
             )
 
-            # Get trade_mode from account and pass it to trading function
-            # Note: The function will still check each account's own trade_mode
-            session = SessionLocal()
             try:
-                account = session.query(Account).filter(Account.id == state.account_id).first()
-                trade_mode = account.trade_mode if account and account.trade_mode in ["real", "paper"] else "paper"
-            finally:
-                session.close()
-            
-            try:
-                # Pass trade_mode, but function will use each account's own trade_mode
-                place_ai_driven_crypto_order(account_ids=[state.account_id], trade_mode=trade_mode)
+                # Place order - only real trading is supported
+                place_ai_driven_crypto_order(account_ids=[state.account_id])
                 state.update_after_trigger(event_time)
                 system_logger.add_log(
                     level="INFO",

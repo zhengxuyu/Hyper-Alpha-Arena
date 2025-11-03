@@ -4,6 +4,7 @@ Provides RESTful API interfaces for crypto market data
 """
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -71,7 +72,6 @@ async def get_crypto_price(symbol: str, market: str = "US"):
     try:
         price = get_last_price(symbol, market)
         
-        import time
         return PriceResponse(
             symbol=symbol,
             market=market,
@@ -101,7 +101,6 @@ async def get_multiple_prices(symbols: str, market: str = "hyperliquid"):
             raise HTTPException(status_code=400, detail="Maximum 20 crypto symbols supported")
         
         results = []
-        import time
         current_timestamp = int(time.time() * 1000)
         
         for symbol in symbol_list:
@@ -228,7 +227,6 @@ async def market_data_health():
         # Test getting a price to check if service is running normally
         test_price = get_last_price("MSFT", "US")
         
-        import time
         return {
             "status": "healthy",
             "timestamp": int(time.time() * 1000),

@@ -15,6 +15,7 @@ from repositories.account_repo import (create_account, deactivate_account,
 from repositories.user_repo import get_user, verify_auth_session
 from schemas.account import (AccountCreate, AccountOut, AccountOverview,
                              AccountUpdate)
+from services.kraken_sync import get_kraken_balance_real_time
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -45,22 +46,31 @@ async def list_user_accounts(session_token: str, db: Session = Depends(get_db)):
         user_id = await get_current_user_id(session_token, db)
         accounts = get_accounts_by_user(db, user_id, active_only=True)
         
-        return [
-            AccountOut(
+        # Get balance from Kraken for each account
+        result = []
+        for account in accounts:
+            try:
+                balance = get_kraken_balance_real_time(account)
+                current_cash = float(balance) if balance is not None else 0.0
+            except Exception:
+                current_cash = 0.0
+            
+            result.append(AccountOut(
                 id=account.id,
                 user_id=account.user_id,
                 name=account.name,
                 model=account.model,
                 base_url=account.base_url,
-                api_key="****" + account.api_key[-4:] if account.api_key else "",  # Mask API key
-                initial_capital=float(account.initial_capital),
-                current_cash=float(account.current_cash),
-                frozen_cash=float(account.frozen_cash),
+                api_key="****" + account.api_key[-4:] if account.api_key else "",
+                kraken_api_key="****" + account.kraken_api_key[-4:] if account.kraken_api_key else "",
+                kraken_private_key="****" + account.kraken_private_key[-4:] if account.kraken_private_key else "",
+                initial_capital=current_cash,
+                current_cash=current_cash,
+                frozen_cash=0.0,
                 account_type=account.account_type,
                 is_active=account.is_active == "true"
-            )
-            for account in accounts
-        ]
+            ))
+        return result
         
     except HTTPException:
         raise
@@ -90,11 +100,19 @@ async def create_trading_account(
             user_id=user_id,
             name=account_data.name,
             account_type=account_data.account_type,
-            initial_capital=account_data.initial_capital,
             model=account_data.model,
             base_url=account_data.base_url,
-            api_key=account_data.api_key
+            api_key=account_data.api_key,
+            kraken_api_key=account_data.kraken_api_key,
+            kraken_private_key=account_data.kraken_private_key
         )
+        
+        # Get balance from Kraken in real-time
+        try:
+            balance = get_kraken_balance_real_time(account)
+            current_cash = float(balance) if balance is not None else 0.0
+        except Exception:
+            current_cash = 0.0
         
         return AccountOut(
             id=account.id,
@@ -103,9 +121,11 @@ async def create_trading_account(
             model=account.model,
             base_url=account.base_url,
             api_key="****" + account.api_key[-4:] if account.api_key else "",
-            initial_capital=float(account.initial_capital),
-            current_cash=float(account.current_cash),
-            frozen_cash=float(account.frozen_cash),
+            kraken_api_key="****" + account.kraken_api_key[-4:] if account.kraken_api_key else "",
+            kraken_private_key="****" + account.kraken_private_key[-4:] if account.kraken_private_key else "",
+            initial_capital=current_cash,
+            current_cash=current_cash,
+            frozen_cash=0.0,
             account_type=account.account_type,
             is_active=account.is_active == "true"
         )
@@ -134,6 +154,13 @@ async def get_account_details(
         if account.user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied")
         
+        # Get balance from Kraken in real-time
+        try:
+            balance = get_kraken_balance_real_time(account)
+            current_cash = float(balance) if balance is not None else 0.0
+        except Exception:
+            current_cash = 0.0
+        
         return AccountOut(
             id=account.id,
             user_id=account.user_id,
@@ -141,9 +168,11 @@ async def get_account_details(
             model=account.model,
             base_url=account.base_url,
             api_key="****" + account.api_key[-4:] if account.api_key else "",
-            initial_capital=float(account.initial_capital),
-            current_cash=float(account.current_cash),
-            frozen_cash=float(account.frozen_cash),
+            kraken_api_key="****" + account.kraken_api_key[-4:] if account.kraken_api_key else "",
+            kraken_private_key="****" + account.kraken_private_key[-4:] if account.kraken_private_key else "",
+            initial_capital=current_cash,
+            current_cash=current_cash,
+            frozen_cash=0.0,
             account_type=account.account_type,
             is_active=account.is_active == "true"
         )
@@ -196,9 +225,16 @@ async def update_trading_account(
             model=updated_account.model,
             base_url=updated_account.base_url,
             api_key="****" + updated_account.api_key[-4:] if updated_account.api_key else "",
-            initial_capital=float(updated_account.initial_capital),
-            current_cash=float(updated_account.current_cash),
-            frozen_cash=float(updated_account.frozen_cash),
+            # Get balance from Kraken in real-time
+            try:
+                balance = get_kraken_balance_real_time(updated_account)
+                current_cash = float(balance) if balance is not None else 0.0
+            except Exception:
+                current_cash = 0.0
+            
+            initial_capital=current_cash,
+            current_cash=current_cash,
+            frozen_cash=0.0,
             account_type=updated_account.account_type,
             is_active=updated_account.is_active == "true"
         )
@@ -250,6 +286,13 @@ async def get_or_create_default(
         if not account:
             raise HTTPException(status_code=404, detail="No accounts found. Please create an account first.")
 
+        # Get balance from Kraken in real-time
+        try:
+            balance = get_kraken_balance_real_time(account)
+            current_cash = float(balance) if balance is not None else 0.0
+        except Exception:
+            current_cash = 0.0
+        
         return AccountOut(
             id=account.id,
             user_id=account.user_id,
@@ -257,9 +300,11 @@ async def get_or_create_default(
             model=account.model,
             base_url=account.base_url,
             api_key="****" + account.api_key[-4:] if account.api_key else "",
-            initial_capital=float(account.initial_capital),
-            current_cash=float(account.current_cash),
-            frozen_cash=float(account.frozen_cash),
+            kraken_api_key="****" + account.kraken_api_key[-4:] if account.kraken_api_key else "",
+            kraken_private_key="****" + account.kraken_private_key[-4:] if account.kraken_private_key else "",
+            initial_capital=current_cash,
+            current_cash=current_cash,
+            frozen_cash=0.0,
             account_type=account.account_type,
             is_active=account.is_active == "true"
         )

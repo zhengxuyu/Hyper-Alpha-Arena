@@ -1,3 +1,4 @@
+import logging
 import os
 import subprocess
 import threading
@@ -7,6 +8,27 @@ from decimal import Decimal
 from pathlib import Path
 
 from config.settings import DEFAULT_TRADING_CONFIGS
+
+# Configure logging
+# Log file path: project root/arena.log (as used in start_arena.sh)
+log_file_path = os.path.join(os.path.dirname(__file__), '..', 'arena.log')
+log_file_path = os.path.abspath(log_file_path)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Output to console
+        logging.FileHandler(log_file_path, mode='a'),  # Output to file
+    ]
+)
+
+# Set root logger level
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Set uvicorn access logger to INFO
+logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 from database.connection import Base, SessionLocal
 from database.models import (Account, AccountAssetSnapshot, SystemConfig,
                              TradingConfig, User)
@@ -165,10 +187,9 @@ def on_startup():
     frontend_watcher_thread.start()
     print("Frontend file watcher started")
 
-    # Create tables in both databases
-    from database.connection import paper_engine, real_engine
-    Base.metadata.create_all(bind=paper_engine)
-    Base.metadata.create_all(bind=real_engine)
+    # Create tables in the single database
+    from database.connection import engine
+    Base.metadata.create_all(bind=engine)
     # Seed trading configs if empty (only in paper database for now)
     db: Session = SessionLocal()
     try:
@@ -187,15 +208,7 @@ def on_startup():
             print(f"[startup] Failed to ensure AI decision log snapshot columns: {migration_err}")
         
         # Ensure accounts table has trade_mode column (migration for existing installs)
-        try:
-            columns = {row[1] for row in db.execute(text("PRAGMA table_info(accounts)"))}
-            if "trade_mode" not in columns:
-                db.execute(text("ALTER TABLE accounts ADD COLUMN trade_mode VARCHAR(10) DEFAULT 'paper'"))
-                db.commit()
-                print("[startup] Added trade_mode column to accounts table")
-        except Exception as migration_err:
-            db.rollback()
-            print(f"[startup] Failed to add trade_mode column to accounts table: {migration_err}")
+        # Migration logic removed - trade_mode column is no longer used
 
         if db.query(TradingConfig).count() == 0:
             for cfg in DEFAULT_TRADING_CONFIGS.values():

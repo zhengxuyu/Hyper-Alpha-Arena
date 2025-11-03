@@ -3,7 +3,7 @@ const API_BASE_URL = process.env.NODE_ENV === 'production'
   ? '/api'
   : '/api'  // Use proxy, don't hardcode port
 
-// Hardcoded user for paper trading (matches backend initialization)
+// Default user (matches backend initialization)
 const HARDCODED_USERNAME = 'default'
 
 // Helper function for making API requests
@@ -155,7 +155,8 @@ export interface TradingAccount {
   account_type: string  // "AI" or "MANUAL"
   is_active: boolean
   auto_trading_enabled?: boolean
-  trade_mode?: string  // "real" for Kraken real trading, "paper" for paper trading
+  kraken_api_key?: string
+  kraken_private_key?: string
 }
 
 export interface TradingAccountCreate {
@@ -163,7 +164,8 @@ export interface TradingAccountCreate {
   model?: string
   base_url?: string
   api_key?: string
-  initial_capital?: number
+  kraken_api_key?: string
+  kraken_private_key?: string
   account_type?: string
   auto_trading_enabled?: boolean
 }
@@ -173,8 +175,9 @@ export interface TradingAccountUpdate {
   model?: string
   base_url?: string
   api_key?: string
+  kraken_api_key?: string
+  kraken_private_key?: string
   auto_trading_enabled?: boolean
-  trade_mode?: string  // "real" for Kraken real trading, "paper" for paper trading
 }
 
 export type StrategyTriggerMode = 'realtime' | 'interval' | 'tick_batch'
@@ -335,7 +338,7 @@ export async function deleteTradingAccount(accountId: number, sessionToken: stri
   })
 }
 
-// Account functions for paper trading with hardcoded user
+// Account functions
 // Note: Backend initializes default user on startup, frontend just queries the endpoints
 export async function getAccounts(): Promise<TradingAccount[]> {
   const response = await apiRequest('/account/list')
@@ -347,20 +350,8 @@ export async function getOverview(): Promise<any> {
   return response.json()
 }
 
-export async function switchGlobalTradeMode(tradeMode: 'real' | 'paper'): Promise<any> {
-  const response = await apiRequest('/account/switch-trade-mode', {
-    method: 'POST',
-    body: JSON.stringify({ trade_mode: tradeMode }),
-  })
-  return response.json()
-}
-
-export async function syncAllAccountsFromKraken(): Promise<any> {
-  const response = await apiRequest('/account/sync-all-from-kraken', {
-    method: 'POST',
-  })
-  return response.json()
-}
+// DEPRECATED: Paper trading removed, only real trading is supported
+// Data is now fetched from Kraken in real-time
 
 export async function createAccount(account: TradingAccountCreate): Promise<TradingAccount> {
   const response = await apiRequest('/account/', {
@@ -370,8 +361,9 @@ export async function createAccount(account: TradingAccountCreate): Promise<Trad
       model: account.model,
       base_url: account.base_url,
       api_key: account.api_key,
+      kraken_api_key: (account as any).kraken_api_key || '',
+      kraken_private_key: (account as any).kraken_private_key || '',
       account_type: account.account_type || 'AI',
-      initial_capital: account.initial_capital || 10000,
       auto_trading_enabled: account.auto_trading_enabled ?? true,
     })
   })
@@ -379,15 +371,19 @@ export async function createAccount(account: TradingAccountCreate): Promise<Trad
 }
 
 export async function updateAccount(accountId: number, account: TradingAccountUpdate): Promise<TradingAccount> {
+  const requestBody: any = {
+    name: account.name,
+    model: account.model,
+    base_url: account.base_url,
+    api_key: account.api_key,
+    kraken_api_key: account.kraken_api_key,
+    kraken_private_key: account.kraken_private_key,
+    auto_trading_enabled: account.auto_trading_enabled,
+  }
+
   const response = await apiRequest(`/account/${accountId}`, {
     method: 'PUT',
-    body: JSON.stringify({
-      name: account.name,
-      model: account.model,
-      base_url: account.base_url,
-      api_key: account.api_key,
-      auto_trading_enabled: account.auto_trading_enabled,
-    })
+    body: JSON.stringify(requestBody)
   })
   return response.json()
 }

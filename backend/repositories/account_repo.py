@@ -10,12 +10,14 @@ def create_account(
     user_id: int,
     name: str,
     account_type: str = "AI",
-    initial_capital: float = 10000.0,
     model: str = "gpt-4-turbo",
     base_url: str = "https://api.openai.com/v1",
-    api_key: str = None
+    api_key: str = None,
+    kraken_api_key: str = None,
+    kraken_private_key: str = None
 ) -> Account:
-    """Create a new trading account"""
+    """Create a new trading account - only stores LLM config and Kraken API keys.
+    Balance and positions are fetched from Kraken in real-time."""
     account = Account(
         user_id=user_id,
         version="v1",
@@ -24,9 +26,8 @@ def create_account(
         model=model if account_type == "AI" else None,
         base_url=base_url if account_type == "AI" else None,
         api_key=api_key if account_type == "AI" else None,
-        initial_capital=initial_capital,
-        current_cash=initial_capital,
-        frozen_cash=0.0,
+        kraken_api_key=kraken_api_key,
+        kraken_private_key=kraken_private_key,
         is_active="true"
     )
     db.add(account)
@@ -52,12 +53,14 @@ def get_or_create_default_account(
     db: Session,
     user_id: int,
     account_name: str = "Default AI Trader",
-    initial_capital: float = 10000.0,
     model: str = "gpt-4-turbo",
     base_url: str = "https://api.openai.com/v1",
-    api_key: str = "default-key-please-update-in-settings"
+    api_key: str = "default-key-please-update-in-settings",
+    kraken_api_key: str = None,
+    kraken_private_key: str = None
 ) -> Optional[Account]:
-    """Get existing account or create default account for new users"""
+    """Get existing account or create default account for new users.
+    Balance and positions are fetched from Kraken in real-time."""
     # Check if user has any accounts
     existing_accounts = get_accounts_by_user(db, user_id, active_only=True)
     if existing_accounts:
@@ -69,10 +72,11 @@ def get_or_create_default_account(
         user_id=user_id,
         name=account_name,
         account_type="AI",
-        initial_capital=initial_capital,
         model=model,
         base_url=base_url,
-        api_key=api_key
+        api_key=api_key,
+        kraken_api_key=kraken_api_key,
+        kraken_private_key=kraken_private_key
     )
 
 
@@ -103,24 +107,7 @@ def update_account(
     return account
 
 
-def update_account_cash(
-    db: Session,
-    account_id: int,
-    current_cash: float,
-    frozen_cash: float = None
-) -> Optional[Account]:
-    """Update account cash balance"""
-    account = db.query(Account).filter(Account.id == account_id).first()
-    if not account:
-        return None
-    
-    account.current_cash = current_cash
-    if frozen_cash is not None:
-        account.frozen_cash = frozen_cash
-    
-    db.commit()
-    db.refresh(account)
-    return account
+# DEPRECATED: update_account_cash removed - balance is now fetched from Kraken in real-time
 
 
 def deactivate_account(db: Session, account_id: int) -> Optional[Account]:

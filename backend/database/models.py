@@ -32,7 +32,11 @@ class User(Base):
 
 
 class Account(Base):
-    """Trading Account with AI model configuration"""
+    """
+    Trading Account with AI model configuration.
+    Only stores LLM configuration (URL, model, API key).
+    All trading data (balance, positions, orders) is fetched in real-time from Kraken.
+    """
     __tablename__ = "accounts"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -46,17 +50,13 @@ class Account(Base):
     auto_trading_enabled = Column(String(10), nullable=False, default="true")
     
     # AI Model Configuration (for AI accounts)
-    model = Column(String(100), nullable=True, default="gpt-4")  # AI model name
-    base_url = Column(String(500), nullable=True, default="https://api.openai.com/v1")  # API endpoint
-    api_key = Column(String(500), nullable=True)  # API key for authentication
+    model = Column(String(100), nullable=True, default="gpt-4")  # AI model name (e.g., "gpt-4-turbo")
+    base_url = Column(String(500), nullable=True, default="https://api.openai.com/v1")  # LLM API endpoint
+    api_key = Column(String(500), nullable=True)  # LLM API key for authentication
     
-    # Trading Account Balances (USD for CRYPTO market)
-    initial_capital = Column(DECIMAL(18, 2), nullable=False, default=10000.00)
-    current_cash = Column(DECIMAL(18, 2), nullable=False, default=10000.00)
-    frozen_cash = Column(DECIMAL(18, 2), nullable=False, default=0.00)
-    
-    # Trading Mode
-    trade_mode = Column(String(10), nullable=False, default="paper")  # "real" for Kraken real trading, "paper" for paper trading
+    # Kraken API Configuration (for real trading)
+    kraken_api_key = Column(String(500), nullable=True)  # Kraken API public key
+    kraken_private_key = Column(String(500), nullable=True)  # Kraken API private key (PVI)
     
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
     updated_at = Column(
@@ -65,8 +65,7 @@ class Account(Base):
 
     # Relationships
     user = relationship("User", back_populates="accounts")
-    positions = relationship("Position", back_populates="account")
-    orders = relationship("Order", back_populates="account")
+    # Note: positions, orders, trades are NOT stored in DB - fetched from Kraken in real-time
     prompt_binding = relationship(
         "AccountPromptBinding",
         back_populates="account",
@@ -104,7 +103,7 @@ class Position(Base):
         TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
     )
 
-    account = relationship("Account", back_populates="positions")
+    account = relationship("Account")
 
 
 class Order(Base):
@@ -128,7 +127,7 @@ class Order(Base):
         TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
     )
 
-    account = relationship("Account", back_populates="orders")
+    account = relationship("Account")
     trades = relationship("Trade", back_populates="order")
 
 
@@ -286,7 +285,7 @@ class AIDecisionLog(Base):
 
     # Relationships
     account = relationship("Account")
-    order = relationship("Order")
+    # Note: order relationship removed - orders are fetched from Kraken in real-time
 
 
 class PromptTemplate(Base):

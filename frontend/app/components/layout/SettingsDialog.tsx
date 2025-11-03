@@ -36,7 +36,8 @@ interface AIAccountCreate extends TradingAccountCreate {
   model?: string
   base_url?: string
   api_key?: string
-  trade_mode?: string  // Keep field but not shown in UI, controlled by global switch
+  kraken_api_key?: string
+  kraken_private_key?: string
 }
 
 export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, embedded = false }: SettingsDialogProps) {
@@ -54,7 +55,6 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
     base_url: '',
     api_key: 'default-key-please-update-in-settings',
     auto_trading_enabled: true,
-    trade_mode: 'paper',  // Default to paper, controlled by global switch
   })
   const [editAccount, setEditAccount] = useState<AIAccountCreate>({
     name: '',
@@ -62,7 +62,8 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
     base_url: '',
     api_key: 'default-key-please-update-in-settings',
     auto_trading_enabled: true,
-    trade_mode: 'paper',  // Default to paper, controlled by global switch
+    kraken_api_key: '',
+    kraken_private_key: '',
   })
 
   const loadAccounts = async () => {
@@ -132,7 +133,7 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
 
       console.log('Creating account with data:', newAccount)
       await createAccount(newAccount)
-      setNewAccount({ name: '', model: '', base_url: '', api_key: 'default-key-please-update-in-settings', auto_trading_enabled: true, trade_mode: 'paper' })
+      setNewAccount({ name: '', model: '', base_url: '', api_key: 'default-key-please-update-in-settings', auto_trading_enabled: true })
       setShowAddForm(false)
       await loadAccounts()
 
@@ -203,7 +204,7 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
       console.log('Updating account with data:', editAccount)
       await updateAccount(editingId, editAccount)
       setEditingId(null)
-      setEditAccount({ name: '', model: '', base_url: '', api_key: '', auto_trading_enabled: true, trade_mode: 'paper' })
+      setEditAccount({ name: '', model: '', base_url: '', api_key: '', auto_trading_enabled: true, kraken_api_key: '', kraken_private_key: '' })
       setTestResult(null)
       await loadAccounts()
 
@@ -231,12 +232,14 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
       base_url: account.base_url || '',
       api_key: account.api_key || '',
       auto_trading_enabled: account.auto_trading_enabled ?? true,
+      kraken_api_key: account.kraken_api_key || '',
+      kraken_private_key: account.kraken_private_key || '',
     })
   }
 
   const cancelEdit = () => {
     setEditingId(null)
-    setEditAccount({ name: '', model: '', base_url: '', api_key: 'default-key-please-update-in-settings', auto_trading_enabled: true, trade_mode: 'paper' })
+    setEditAccount({ name: '', model: '', base_url: '', api_key: 'default-key-please-update-in-settings', auto_trading_enabled: true, kraken_api_key: '', kraken_private_key: '' })
     setTestResult(null)
     setError(null)
   }
@@ -375,6 +378,18 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
                         value={editAccount.api_key || ''}
                         onChange={(e) => setEditAccount({ ...editAccount, api_key: e.target.value })}
                       />
+                      <Input
+                        placeholder="Kraken API Key"
+                        type="password"
+                        value={editAccount.kraken_api_key || ''}
+                        onChange={(e) => setEditAccount({ ...editAccount, kraken_api_key: e.target.value })}
+                      />
+                      <Input
+                        placeholder="Kraken Private Key"
+                        type="password"
+                        value={editAccount.kraken_private_key || ''}
+                        onChange={(e) => setEditAccount({ ...editAccount, kraken_private_key: e.target.value })}
+                      />
                       <label className="flex items-center gap-2 text-sm text-muted-foreground">
                         <input
                           type="checkbox"
@@ -431,7 +446,7 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
                           </div>
                         )}
                         <div className="text-xs text-muted-foreground">
-                          Cash: ${account.current_cash?.toLocaleString() || '0'}
+                          Balance: Fetched from Kraken in real-time
                         </div>
                       </div>
                       <div className="flex items-center gap-2">

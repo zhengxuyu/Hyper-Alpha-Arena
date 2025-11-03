@@ -57,6 +57,27 @@ def initialize_services():
         start_asset_curve_broadcast()
         logger.info("Asset curve broadcast task started (60-second interval)")
 
+        # P1 Fix: Schedule position sync task to maintain data consistency with Kraken
+        # Sync database positions with Kraken every 15 minutes
+        from services.scheduler import sync_positions_task
+        POSITION_SYNC_JOB_ID = "position_sync"
+        POSITION_SYNC_INTERVAL = 900  # 15 minutes in seconds
+        
+        try:
+            # Remove existing job if it exists
+            if task_scheduler.scheduler and task_scheduler.scheduler.get_job(POSITION_SYNC_JOB_ID):
+                task_scheduler.remove_task(POSITION_SYNC_JOB_ID)
+            
+            # Add position sync task
+            task_scheduler.add_interval_task(
+                task_func=sync_positions_task,
+                interval_seconds=POSITION_SYNC_INTERVAL,
+                task_id=POSITION_SYNC_JOB_ID
+            )
+            logger.info(f"Position sync task scheduled: every {POSITION_SYNC_INTERVAL} seconds (15 minutes)")
+        except Exception as e:
+            logger.error(f"Failed to schedule position sync task: {e}", exc_info=True)
+
         logger.info("All services initialized successfully")
 
     except Exception as e:
@@ -98,6 +119,7 @@ def schedule_auto_trading(interval_seconds: int = 300, max_ratio: float = 0.2, u
         max_ratio: Maximum portion of portfolio to use per trade
         use_ai: If True, use AI-driven trading; if False, use random trading
     """
+    from services.scheduler import sync_positions_task, task_scheduler
     from services.auto_trader import (AI_TRADE_JOB_ID, AUTO_TRADE_JOB_ID,
                                       place_ai_driven_crypto_order,
                                       place_random_crypto_order)
