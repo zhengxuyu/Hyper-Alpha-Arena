@@ -1,7 +1,18 @@
 import datetime
 
-from sqlalchemy import (DECIMAL, TIMESTAMP, Column, Date, DateTime, Float,
-                        ForeignKey, Integer, String, Text, UniqueConstraint)
+from sqlalchemy import (
+    DECIMAL,
+    TIMESTAMP,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -13,6 +24,7 @@ class User(Base):
     User for authentication and account management
     In this project, use the default user, no user login
     """
+
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -20,11 +32,9 @@ class User(Base):
     email = Column(String(100), nullable=True)
     password_hash = Column(String(255), nullable=True)  # For future password authentication
     is_active = Column(String(10), nullable=False, default="true")
-    
+
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
-    updated_at = Column(
-        TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
-    )
+    updated_at = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
     # Relationships
     accounts = relationship("Account", back_populates="user")
@@ -35,37 +45,36 @@ class Account(Base):
     """
     Trading Account with AI model configuration.
     Only stores LLM configuration (URL, model, API key).
-    All trading data (balance, positions, orders) is fetched in real-time from Kraken.
+    All trading data (balance, positions, orders) is fetched in real-time from Binance.
     """
+
     __tablename__ = "accounts"
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     version = Column(String(100), nullable=False, default="v1")
-    
+
     # Account Identity
     name = Column(String(100), nullable=False)  # Display name (e.g., "GPT Trader", "Claude Analyst")
     account_type = Column(String(20), nullable=False, default="AI")  # "AI" or "MANUAL"
     is_active = Column(String(10), nullable=False, default="true")
     auto_trading_enabled = Column(String(10), nullable=False, default="true")
-    
+
     # AI Model Configuration (for AI accounts)
     model = Column(String(100), nullable=True, default="gpt-4")  # AI model name (e.g., "gpt-4-turbo")
     base_url = Column(String(500), nullable=True, default="https://api.openai.com/v1")  # LLM API endpoint
     api_key = Column(String(500), nullable=True)  # LLM API key for authentication
-    
-    # Kraken API Configuration (for real trading)
-    kraken_api_key = Column(String(500), nullable=True)  # Kraken API public key
-    kraken_private_key = Column(String(500), nullable=True)  # Kraken API private key (PVI)
-    
+
+    # Binance API Configuration (for real trading)
+    binance_api_key = Column(String(500), nullable=True)  # Binance API key
+    binance_secret_key = Column(String(500), nullable=True)  # Binance secret key
+
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
-    updated_at = Column(
-        TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
-    )
+    updated_at = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
     # Relationships
     user = relationship("User", back_populates="accounts")
-    # Note: positions, orders, trades are NOT stored in DB - fetched from Kraken in real-time
+    # Note: positions, orders, trades are NOT stored in DB - fetched from Binance in real-time
     prompt_binding = relationship(
         "AccountPromptBinding",
         back_populates="account",
@@ -82,7 +91,7 @@ class UserAuthSession(Base):
     session_token = Column(String(64), unique=True, nullable=False, index=True)
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
-    
+
     user = relationship("User", back_populates="auth_sessions")
 
 
@@ -99,9 +108,7 @@ class Position(Base):
     available_quantity = Column(DECIMAL(18, 8), nullable=False, default=0)
     avg_cost = Column(DECIMAL(18, 6), nullable=False, default=0)
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
-    updated_at = Column(
-        TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
-    )
+    updated_at = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
     account = relationship("Account")
 
@@ -114,7 +121,7 @@ class Order(Base):
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
     order_no = Column(String(32), unique=True, nullable=False)
     symbol = Column(String(20), nullable=False)  # e.g., 'BTC/USD'
-    name = Column(String(100), nullable=False)   # e.g., 'Bitcoin'
+    name = Column(String(100), nullable=False)  # e.g., 'Bitcoin'
     market = Column(String(10), nullable=False, default="CRYPTO")
     side = Column(String(10), nullable=False)
     order_type = Column(String(20), nullable=False)
@@ -123,9 +130,7 @@ class Order(Base):
     filled_quantity = Column(DECIMAL(18, 8), nullable=False, default=0)
     status = Column(String(20), nullable=False)
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
-    updated_at = Column(
-        TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
-    )
+    updated_at = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
     account = relationship("Account")
     trades = relationship("Trade", back_populates="order")
@@ -138,7 +143,7 @@ class Trade(Base):
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
     symbol = Column(String(20), nullable=False)  # e.g., 'BTC/USD'
-    name = Column(String(100), nullable=False)   # e.g., 'Bitcoin'
+    name = Column(String(100), nullable=False)  # e.g., 'Bitcoin'
     market = Column(String(10), nullable=False, default="CRYPTO")
     side = Column(String(10), nullable=False)
     price = Column(DECIMAL(18, 6), nullable=False)
@@ -161,11 +166,9 @@ class TradingConfig(Base):
     min_order_quantity = Column(Integer, nullable=False, default=1)
     lot_size = Column(Integer, nullable=False, default=1)
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
-    updated_at = Column(
-        TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
-    )
+    updated_at = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
-    __table_args__ = (UniqueConstraint('market', 'version'),)
+    __table_args__ = (UniqueConstraint("market", "version"),)
 
 
 class SystemConfig(Base):
@@ -176,9 +179,7 @@ class SystemConfig(Base):
     value = Column(String(5000), nullable=True)  # 增加到5000字符以支持长cookie
     description = Column(String(500), nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
-    updated_at = Column(
-        TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
-    )
+    updated_at = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
 
 class CryptoPrice(Base):
@@ -190,11 +191,9 @@ class CryptoPrice(Base):
     price = Column(DECIMAL(18, 6), nullable=False)
     price_date = Column(Date, nullable=False, index=True)
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
-    updated_at = Column(
-        TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
-    )
+    updated_at = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
-    __table_args__ = (UniqueConstraint('symbol', 'market', 'price_date'),)
+    __table_args__ = (UniqueConstraint("symbol", "market", "price_date"),)
 
 
 class CryptoKline(Base):
@@ -216,7 +215,7 @@ class CryptoKline(Base):
     percent = Column(DECIMAL(10, 4), nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
 
-    __table_args__ = (UniqueConstraint('symbol', 'market', 'period', 'timestamp'),)
+    __table_args__ = (UniqueConstraint("symbol", "market", "period", "timestamp"),)
 
 
 class CryptoPriceTick(Base):
@@ -257,9 +256,7 @@ class AccountStrategyConfig(Base):
     enabled = Column(String(10), nullable=False, default="true")
     last_trigger_at = Column(TIMESTAMP, nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
-    updated_at = Column(
-        TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
-    )
+    updated_at = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
     account = relationship("Account")
 
@@ -285,7 +282,7 @@ class AIDecisionLog(Base):
 
     # Relationships
     account = relationship("Account")
-    # Note: order relationship removed - orders are fetched from Kraken in real-time
+    # Note: order relationship removed - orders are fetched from Binance in real-time
 
 
 class PromptTemplate(Base):
@@ -299,9 +296,7 @@ class PromptTemplate(Base):
     system_template_text = Column(Text, nullable=False)
     updated_by = Column(String(100), nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
-    updated_at = Column(
-        TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
-    )
+    updated_at = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
     account_bindings = relationship(
         "AccountPromptBinding",
@@ -318,9 +313,7 @@ class AccountPromptBinding(Base):
     prompt_template_id = Column(Integer, ForeignKey("prompt_templates.id"), nullable=False)
     updated_by = Column(String(100), nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
-    updated_at = Column(
-        TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
-    )
+    updated_at = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
     account = relationship("Account", back_populates="prompt_binding")
     prompt_template = relationship("PromptTemplate", back_populates="account_bindings")

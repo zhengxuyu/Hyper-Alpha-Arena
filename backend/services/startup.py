@@ -4,17 +4,17 @@ import logging
 import threading
 
 from services.asset_snapshot_service import handle_price_update
-from services.auto_trader import (AI_TRADE_JOB_ID, AUTO_TRADE_JOB_ID,
-                                  place_ai_driven_crypto_order,
-                                  place_random_crypto_order)
-from services.market_events import (subscribe_price_updates,
-                                    unsubscribe_price_updates)
+from services.auto_trader import (
+    AI_TRADE_JOB_ID,
+    AUTO_TRADE_JOB_ID,
+    place_ai_driven_crypto_order,
+    place_random_crypto_order,
+)
+from services.market_events import subscribe_price_updates, unsubscribe_price_updates
 from services.market_stream import start_market_stream, stop_market_stream
-from services.scheduler import (setup_market_tasks, start_scheduler,
-                                task_scheduler)
+from services.scheduler import setup_market_tasks, start_scheduler, task_scheduler
 from services.trading_commands import AI_TRADING_SYMBOLS
-from services.trading_strategy import (start_trading_strategy_manager,
-                                       stop_trading_strategy_manager)
+from services.trading_strategy import start_trading_strategy_manager, stop_trading_strategy_manager
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +32,9 @@ def initialize_services():
 
         # Add price cache cleanup task (every 2 minutes)
         from services.price_cache import clear_expired_prices
+
         task_scheduler.add_interval_task(
-            task_func=clear_expired_prices,
-            interval_seconds=120,  # Clean every 2 minutes
-            task_id="price_cache_cleanup"
+            task_func=clear_expired_prices, interval_seconds=120, task_id="price_cache_cleanup"  # Clean every 2 minutes
         )
         logger.info("Price cache cleanup task started (2-minute interval)")
 
@@ -46,6 +45,7 @@ def initialize_services():
 
         # Start price snapshot logger (every 60 seconds)
         from services.system_logger import price_snapshot_logger
+
         price_snapshot_logger.start()
         logger.info("Price snapshot logger started (60-second interval)")
 
@@ -54,25 +54,25 @@ def initialize_services():
 
         # Start asset curve broadcast task (every 60 seconds)
         from services.scheduler import start_asset_curve_broadcast
+
         start_asset_curve_broadcast()
         logger.info("Asset curve broadcast task started (60-second interval)")
 
-        # P1 Fix: Schedule position sync task to maintain data consistency with Kraken
-        # Sync database positions with Kraken every 15 minutes
+        # P1 Fix: Schedule position sync task to maintain data consistency with Binance
+        # Sync database positions with Binance every 15 minutes
         from services.scheduler import sync_positions_task
+
         POSITION_SYNC_JOB_ID = "position_sync"
         POSITION_SYNC_INTERVAL = 900  # 15 minutes in seconds
-        
+
         try:
             # Remove existing job if it exists
             if task_scheduler.scheduler and task_scheduler.scheduler.get_job(POSITION_SYNC_JOB_ID):
                 task_scheduler.remove_task(POSITION_SYNC_JOB_ID)
-            
+
             # Add position sync task
             task_scheduler.add_interval_task(
-                task_func=sync_positions_task,
-                interval_seconds=POSITION_SYNC_INTERVAL,
-                task_id=POSITION_SYNC_JOB_ID
+                task_func=sync_positions_task, interval_seconds=POSITION_SYNC_INTERVAL, task_id=POSITION_SYNC_JOB_ID
             )
             logger.info(f"Position sync task scheduled: every {POSITION_SYNC_INTERVAL} seconds (15 minutes)")
         except Exception as e:
@@ -90,6 +90,7 @@ def shutdown_services():
     try:
         from services.scheduler import stop_scheduler
         from services.system_logger import price_snapshot_logger
+
         stop_trading_strategy_manager()
         stop_market_stream()
         unsubscribe_price_updates(handle_price_update)
@@ -113,16 +114,19 @@ async def shutdown_event():
 
 def schedule_auto_trading(interval_seconds: int = 300, max_ratio: float = 0.2, use_ai: bool = True) -> None:
     """Schedule automatic trading tasks
-    
+
     Args:
         interval_seconds: Interval between trading attempts
         max_ratio: Maximum portion of portfolio to use per trade
         use_ai: If True, use AI-driven trading; if False, use random trading
     """
     from services.scheduler import sync_positions_task, task_scheduler
-    from services.auto_trader import (AI_TRADE_JOB_ID, AUTO_TRADE_JOB_ID,
-                                      place_ai_driven_crypto_order,
-                                      place_random_crypto_order)
+    from services.auto_trader import (
+        AI_TRADE_JOB_ID,
+        AUTO_TRADE_JOB_ID,
+        place_ai_driven_crypto_order,
+        place_random_crypto_order,
+    )
 
     def execute_trade():
         try:
@@ -150,7 +154,7 @@ def schedule_auto_trading(interval_seconds: int = 300, max_ratio: float = 0.2, u
         task_id=job_id,
         max_ratio=max_ratio,
     )
-    
+
     # Execute the first trade immediately in a separate thread to avoid blocking
     initial_trade = threading.Thread(target=execute_trade, daemon=True)
     initial_trade.start()

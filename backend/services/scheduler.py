@@ -27,12 +27,12 @@ logger = logging.getLogger(__name__)
 
 class TaskScheduler:
     """Unified task scheduler"""
-    
+
     def __init__(self):
         self.scheduler: Optional[BackgroundScheduler] = None
         self._started = False
         self._account_connections: Dict[int, Set] = {}  # track account connections
-        
+
     def start(self):
         """Start the scheduler"""
         if not self._started:
@@ -40,36 +40,36 @@ class TaskScheduler:
             self.scheduler.start()
             self._started = True
             logger.info("Scheduler started")
-    
+
     def shutdown(self):
         """Shutdown the scheduler"""
         if self.scheduler and self.scheduler.running:
             self.scheduler.shutdown()
             self._started = False
             logger.info("Scheduler shutdown")
-    
+
     def is_running(self) -> bool:
         """Check if scheduler is running"""
         return self._started and self.scheduler and self.scheduler.running
-    
+
     def add_account_snapshot_task(self, account_id: int, interval_seconds: int = 30):
         """
         Add snapshot update task for account
 
         Args:
             account_id: Account ID
-            interval_seconds: Update interval (seconds), default 30 seconds (reduced to avoid Kraken API rate limits)
+            interval_seconds: Update interval (seconds), default 30 seconds (reduced to avoid Binance API rate limits)
         """
         if not self.is_running():
             self.start()
-            
+
         job_id = f"snapshot_account_{account_id}"
-        
+
         # Check if task already exists
         if self.scheduler.get_job(job_id):
             logger.debug(f"Snapshot task for account {account_id} already exists")
             return
-        
+
         self.scheduler.add_job(
             func=self._execute_account_snapshot,
             trigger=IntervalTrigger(seconds=interval_seconds),
@@ -77,12 +77,12 @@ class TaskScheduler:
             id=job_id,
             replace_existing=True,
             max_instances=1,  # Avoid duplicate execution
-            coalesce=True,    # Combine missed executions into one
-            misfire_grace_time=5  # Allow 5 seconds grace time for late execution
+            coalesce=True,  # Combine missed executions into one
+            misfire_grace_time=5,  # Allow 5 seconds grace time for late execution
         )
-        
+
         logger.info(f"Added snapshot task for account {account_id}, interval {interval_seconds} seconds")
-    
+
     def remove_account_snapshot_task(self, account_id: int):
         """
         Remove snapshot update task for account
@@ -92,16 +92,15 @@ class TaskScheduler:
         """
         if not self.scheduler:
             return
-            
+
         job_id = f"snapshot_account_{account_id}"
-        
+
         try:
             self.scheduler.remove_job(job_id)
             logger.info(f"Removed snapshot task for account {account_id}")
         except Exception as e:
             logger.debug(f"Failed to remove snapshot task for account {account_id}: {e}")
-    
-    
+
     def add_interval_task(self, task_func: Callable, interval_seconds: int, task_id: str, *args, **kwargs):
         """
         Add interval execution task
@@ -114,18 +113,18 @@ class TaskScheduler:
         """
         if not self.is_running():
             self.start()
-            
+
         self.scheduler.add_job(
             func=task_func,
             trigger=IntervalTrigger(seconds=interval_seconds),
             args=args,
             kwargs=kwargs,
             id=task_id,
-            replace_existing=True
+            replace_existing=True,
         )
-        
+
         logger.info(f"Added interval task {task_id}: Execute every {interval_seconds} seconds")
-    
+
     def remove_task(self, task_id: str):
         """
         Remove specified task
@@ -135,7 +134,7 @@ class TaskScheduler:
         """
         if not self.scheduler:
             return
-            
+
         try:
             self.scheduler.remove_job(task_id)
             logger.info(f"Removed task: {task_id}")
@@ -149,11 +148,13 @@ class TaskScheduler:
 
         jobs = []
         for job in self.scheduler.get_jobs():
-            jobs.append({
-                'id': job.id,
-                'next_run_time': job.next_run_time,
-                'func_name': job.func.__name__ if hasattr(job.func, '__name__') else str(job.func)
-            })
+            jobs.append(
+                {
+                    "id": job.id,
+                    "next_run_time": job.next_run_time,
+                    "func_name": job.func.__name__ if hasattr(job.func, "__name__") else str(job.func),
+                }
+            )
         return jobs
 
     async def _execute_account_snapshot(self, account_id: int):
@@ -195,7 +196,7 @@ class TaskScheduler:
             execution_time = (datetime.now() - start_time).total_seconds()
             if execution_time > 5:  # Log if execution takes longer than 5 seconds
                 logger.warning(f"Slow snapshot execution for account {account_id}: {execution_time:.2f}s")
-    
+
     def _save_position_prices(self, db: Session, account_id: int):
         """
         Save latest prices for account's positions on the current date
@@ -206,10 +207,7 @@ class TaskScheduler:
         """
         try:
             # Get all account's positions
-            positions = db.query(Position).filter(
-                Position.account_id == account_id,
-                Position.quantity > 0
-            ).all()
+            positions = db.query(Position).filter(Position.account_id == account_id, Position.quantity > 0).all()
 
             if not positions:
                 logger.debug(f"Account {account_id} has no positions, skip price saving")
@@ -220,11 +218,15 @@ class TaskScheduler:
             for position in positions:
                 try:
                     # Check if crypto price already saved today
-                    existing_price = db.query(CryptoPrice).filter(
-                        CryptoPrice.symbol == position.symbol,
-                        CryptoPrice.market == position.market,
-                        CryptoPrice.price_date == today
-                    ).first()
+                    existing_price = (
+                        db.query(CryptoPrice)
+                        .filter(
+                            CryptoPrice.symbol == position.symbol,
+                            CryptoPrice.market == position.market,
+                            CryptoPrice.price_date == today,
+                        )
+                        .first()
+                    )
 
                     if existing_price:
                         logger.debug(f"crypto {position.symbol} price already exists for today, skip")
@@ -235,10 +237,7 @@ class TaskScheduler:
 
                     # Save price record
                     crypto_price = CryptoPrice(
-                        symbol=position.symbol,
-                        market=position.market,
-                        price=current_price,
-                        price_date=today
+                        symbol=position.symbol, market=position.market, price=current_price, price_date=today
                     )
 
                     db.add(crypto_price)
@@ -262,12 +261,13 @@ task_scheduler = TaskScheduler()
 
 def sync_positions_task():
     """
-    Scheduled task to sync database positions with Kraken.
-    This ensures data consistency between our database and Kraken actual positions.
+    Scheduled task to sync database positions with Binance.
+    This ensures data consistency between our database and Binance actual positions.
     Should run every 10-15 minutes to avoid excessive API calls.
     """
     try:
         from services.position_sync import sync_all_active_accounts_positions
+
         stats = sync_all_active_accounts_positions()
         logger.debug(f"Position sync task completed: {stats}")
     except Exception as e:
@@ -332,9 +332,7 @@ def _ensure_market_data_ready() -> None:
                 logger.warning(f"Failed to prefetch price for {symbol}: {fetch_err}")
 
         if missing_symbols:
-            raise RuntimeError(
-                "Market data not ready for symbols: " + ", ".join(sorted(set(missing_symbols)))
-            )
+            raise RuntimeError("Market data not ready for symbols: " + ", ".join(sorted(set(missing_symbols))))
 
     except Exception as err:
         logger.error(f"Market data readiness check failed: {err}")
@@ -350,7 +348,7 @@ def reset_auto_trading_job():
 
         # Define interval (5 minutes)
         AI_TRADE_INTERVAL_SECONDS = 300
-        
+
         # Ensure market data is ready before scheduling trading tasks
         _ensure_market_data_ready()
 
@@ -363,14 +361,14 @@ def reset_auto_trading_job():
         if task_scheduler.scheduler and task_scheduler.scheduler.get_job(AI_TRADE_JOB_ID):
             task_scheduler.remove_task(AI_TRADE_JOB_ID)
             logger.info(f"Removed existing auto trading job: {AI_TRADE_JOB_ID}")
-        
+
         # Re-add the auto trading job with updated configuration
         task_scheduler.add_interval_task(
             task_func=lambda: place_ai_driven_crypto_order(max_ratio=0.2),  # Uses imported function from top
             interval_seconds=AI_TRADE_INTERVAL_SECONDS,
-            task_id=AI_TRADE_JOB_ID
+            task_id=AI_TRADE_JOB_ID,
         )
-        
+
         logger.info(f"Auto trading job reset successfully - interval: {AI_TRADE_INTERVAL_SECONDS}s")
 
     except Exception as e:
@@ -402,7 +400,7 @@ def start_asset_curve_broadcast():
         finally:
             try:
                 loop.close()
-            except:
+            except Exception:
                 pass
 
     try:
@@ -424,7 +422,7 @@ def start_asset_curve_broadcast():
         task_scheduler.add_interval_task(
             task_func=broadcast_all_timeframes,
             interval_seconds=BROADCAST_INTERVAL_SECONDS,
-            task_id=ASSET_CURVE_BROADCAST_JOB_ID
+            task_id=ASSET_CURVE_BROADCAST_JOB_ID,
         )
 
         logger.info(f"Asset curve broadcast job started - interval: {BROADCAST_INTERVAL_SECONDS}s")

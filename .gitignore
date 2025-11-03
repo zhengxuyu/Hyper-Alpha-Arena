@@ -325,3 +325,5 @@ REAL_TRADING_PLAN.md
 
 kraken/token_map.yaml
 .api.yaml
+
+uv.lock

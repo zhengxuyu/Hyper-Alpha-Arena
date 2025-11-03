@@ -37,11 +37,11 @@ export default function AuthDialog({
   const handleConfirmTrade = () => {
     if (!pendingTrade) return
 
-    // Trades are executed directly on Kraken
-    toast.success('Trade confirmed - Executing on Kraken')
+    // Trades are executed directly on Binance
+    toast.success('Trade confirmed - Executing on Binance')
 
-    // Use a dummy session token (real trades go through Kraken API)
-    const dummySessionToken = 'kraken-real-trading'
+    // Use a dummy session token (real trades go through Binance API)
+    const dummySessionToken = 'binance-real-trading'
     const finalOrderData = {
       ...orderData,
       session_token: dummySessionToken
@@ -70,7 +70,7 @@ export default function AuthDialog({
 
           <div className="bg-yellow-50 dark:bg-yellow-950 p-3 rounded">
             <p className="text-xs text-yellow-700 dark:text-yellow-300">
-              ⚠️ Real Trading Mode - Trades will be executed on Kraken with real funds
+              ⚠️ Real Trading Mode - Trades will be executed on Binance with real funds
             </p>
           </div>
 

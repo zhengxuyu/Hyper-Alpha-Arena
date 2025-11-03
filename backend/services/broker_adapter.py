@@ -3,6 +3,7 @@ Broker Adapter - Convenience functions for using broker interface
 Provides backward-compatible wrapper functions that use the broker interface.
 Includes async wrappers for use in async contexts to avoid blocking the event loop.
 """
+
 import asyncio
 import concurrent.futures
 from decimal import Decimal
@@ -14,51 +15,52 @@ from .broker_factory import get_broker
 
 # Thread pool executor for running synchronous broker calls in async contexts
 # This prevents blocking the async event loop
-_executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=10,
-    thread_name_prefix="broker_executor"
-)
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10, thread_name_prefix="broker_executor")
 
 
 def get_balance(account: Account) -> Optional[Decimal]:
     """
     Get account balance - uses broker interface.
-    
+    Uses get_balance_and_positions for efficiency (single API call).
+
     Args:
         account: Account object
-    
+
     Returns:
         USD balance as Decimal, or None if unavailable
     """
     broker = get_broker(account)
     if not broker:
         return None
-    return broker.get_balance(account)
+    balance, _ = broker.get_balance_and_positions(account)
+    return balance
 
 
 def get_positions(account: Account) -> List[Dict]:
     """
     Get account positions - uses broker interface.
-    
+    Uses get_balance_and_positions for efficiency (single API call).
+
     Args:
         account: Account object
-    
+
     Returns:
         List of position dictionaries
     """
     broker = get_broker(account)
     if not broker:
         return []
-    return broker.get_positions(account)
+    _, positions = broker.get_balance_and_positions(account)
+    return positions
 
 
 def get_balance_and_positions(account: Account) -> Tuple[Optional[Decimal], List[Dict]]:
     """
     Get both balance and positions - uses broker interface.
-    
+
     Args:
         account: Account object
-    
+
     Returns:
         Tuple of (balance, positions)
     """
@@ -71,10 +73,10 @@ def get_balance_and_positions(account: Account) -> Tuple[Optional[Decimal], List
 def get_open_orders(account: Account) -> List[Dict]:
     """
     Get open orders - uses broker interface.
-    
+
     Args:
         account: Account object
-    
+
     Returns:
         List of open order dictionaries
     """
@@ -87,11 +89,11 @@ def get_open_orders(account: Account) -> List[Dict]:
 def get_closed_orders(account: Account, limit: int = 100) -> List[Dict]:
     """
     Get closed orders - uses broker interface.
-    
+
     Args:
         account: Account object
         limit: Maximum number of orders to retrieve
-    
+
     Returns:
         List of closed order dictionaries
     """
@@ -102,16 +104,11 @@ def get_closed_orders(account: Account, limit: int = 100) -> List[Dict]:
 
 
 def execute_order(
-    account: Account,
-    symbol: str,
-    side: str,
-    quantity: float,
-    price: float,
-    ordertype: str = "market"
+    account: Account, symbol: str, side: str, quantity: float, price: float, ordertype: str = "market"
 ) -> Tuple[bool, Optional[str], Optional[Dict]]:
     """
     Execute an order - uses broker interface.
-    
+
     Args:
         account: Account object
         symbol: Trading symbol
@@ -119,7 +116,7 @@ def execute_order(
         quantity: Order quantity
         price: Order price
         ordertype: Order type ("market", "limit", etc.)
-    
+
     Returns:
         Tuple of (success, order_id_or_error, result)
     """
@@ -132,11 +129,11 @@ def execute_order(
 def cancel_order(account: Account, order_id: str) -> Tuple[bool, Optional[str], Optional[Dict]]:
     """
     Cancel an order - uses broker interface.
-    
+
     Args:
         account: Account object
         order_id: Broker's order ID
-    
+
     Returns:
         Tuple of (success, error_message, result)
     """
@@ -151,6 +148,7 @@ def cancel_order(account: Account, order_id: str) -> Tuple[bool, Optional[str], 
 # These run synchronous broker calls in a thread pool to avoid blocking
 # the async event loop
 # ============================================================================
+
 
 async def get_balance_async(account: Account) -> Optional[Decimal]:
     """Async wrapper for get_balance - runs in thread pool to avoid blocking"""
@@ -183,29 +181,14 @@ async def get_closed_orders_async(account: Account, limit: int = 100) -> List[Di
 
 
 async def execute_order_async(
-    account: Account,
-    symbol: str,
-    side: str,
-    quantity: float,
-    price: float,
-    ordertype: str = "market"
+    account: Account, symbol: str, side: str, quantity: float, price: float, ordertype: str = "market"
 ) -> Tuple[bool, Optional[str], Optional[Dict]]:
     """Async wrapper for execute_order - runs in thread pool to avoid blocking"""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        _executor,
-        execute_order,
-        account,
-        symbol,
-        side,
-        quantity,
-        price,
-        ordertype
-    )
+    return await loop.run_in_executor(_executor, execute_order, account, symbol, side, quantity, price, ordertype)
 
 
 async def cancel_order_async(account: Account, order_id: str) -> Tuple[bool, Optional[str], Optional[Dict]]:
     """Async wrapper for cancel_order - runs in thread pool to avoid blocking"""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(_executor, cancel_order, account, order_id)
-

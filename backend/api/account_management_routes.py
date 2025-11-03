@@ -8,14 +8,18 @@ from typing import List
 from database.connection import SessionLocal
 from database.models import Account
 from fastapi import APIRouter, Depends, HTTPException
-from repositories.account_repo import (create_account, deactivate_account,
-                                       get_account, get_accounts_by_user,
-                                       get_or_create_default_account,
-                                       update_account, update_account_cash)
+from repositories.account_repo import (
+    create_account,
+    deactivate_account,
+    get_account,
+    get_accounts_by_user,
+    get_or_create_default_account,
+    update_account,
+    update_account_cash,
+)
 from repositories.user_repo import get_user, verify_auth_session
-from schemas.account import (AccountCreate, AccountOut, AccountOverview,
-                             AccountUpdate)
-from services.kraken_sync import get_kraken_balance_real_time
+from schemas.account import AccountCreate, AccountOut, AccountOverview, AccountUpdate
+from services.broker_adapter import get_balance_and_positions
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -45,33 +49,35 @@ async def list_user_accounts(session_token: str, db: Session = Depends(get_db)):
     try:
         user_id = await get_current_user_id(session_token, db)
         accounts = get_accounts_by_user(db, user_id, active_only=True)
-        
-        # Get balance from Kraken for each account
+
+        # Get balance from Binance for each account
         result = []
         for account in accounts:
             try:
-                balance = get_kraken_balance_real_time(account)
+                balance, _ = get_balance_and_positions(account)
                 current_cash = float(balance) if balance is not None else 0.0
             except Exception:
                 current_cash = 0.0
-            
-            result.append(AccountOut(
-                id=account.id,
-                user_id=account.user_id,
-                name=account.name,
-                model=account.model,
-                base_url=account.base_url,
-                api_key="****" + account.api_key[-4:] if account.api_key else "",
-                kraken_api_key="****" + account.kraken_api_key[-4:] if account.kraken_api_key else "",
-                kraken_private_key="****" + account.kraken_private_key[-4:] if account.kraken_private_key else "",
-                initial_capital=current_cash,
-                current_cash=current_cash,
-                frozen_cash=0.0,
-                account_type=account.account_type,
-                is_active=account.is_active == "true"
-            ))
+
+            result.append(
+                AccountOut(
+                    id=account.id,
+                    user_id=account.user_id,
+                    name=account.name,
+                    model=account.model,
+                    base_url=account.base_url,
+                    api_key="****" + account.api_key[-4:] if account.api_key else "",
+                    binance_api_key="****" + account.binance_api_key[-4:] if account.binance_api_key else "",
+                    binance_secret_key="****" + account.binance_secret_key[-4:] if account.binance_secret_key else "",
+                    initial_capital=current_cash,
+                    current_cash=current_cash,
+                    frozen_cash=0.0,
+                    account_type=account.account_type,
+                    is_active=account.is_active == "true",
+                )
+            )
         return result
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -80,21 +86,17 @@ async def list_user_accounts(session_token: str, db: Session = Depends(get_db)):
 
 
 @router.post("/", response_model=AccountOut)
-async def create_trading_account(
-    session_token: str,
-    account_data: AccountCreate,
-    db: Session = Depends(get_db)
-):
+async def create_trading_account(session_token: str, account_data: AccountCreate, db: Session = Depends(get_db)):
     """Create a new trading account"""
     try:
         user_id = await get_current_user_id(session_token, db)
-        
+
         # Check if account name exists for this user
         existing_accounts = get_accounts_by_user(db, user_id, active_only=True)
         for acc in existing_accounts:
             if acc.name == account_data.name:
                 raise HTTPException(status_code=400, detail="Account name already exists")
-        
+
         account = create_account(
             db=db,
             user_id=user_id,
@@ -103,17 +105,17 @@ async def create_trading_account(
             model=account_data.model,
             base_url=account_data.base_url,
             api_key=account_data.api_key,
-            kraken_api_key=account_data.kraken_api_key,
-            kraken_private_key=account_data.kraken_private_key
+            binance_api_key=account_data.binance_api_key,
+            binance_secret_key=account_data.binance_secret_key,
         )
-        
-        # Get balance from Kraken in real-time
+
+        # Get balance from Binance in real-time (single API call)
         try:
-            balance = get_kraken_balance_real_time(account)
+            balance, _ = get_balance_and_positions(account)
             current_cash = float(balance) if balance is not None else 0.0
         except Exception:
             current_cash = 0.0
-        
+
         return AccountOut(
             id=account.id,
             user_id=account.user_id,
@@ -121,15 +123,15 @@ async def create_trading_account(
             model=account.model,
             base_url=account.base_url,
             api_key="****" + account.api_key[-4:] if account.api_key else "",
-            kraken_api_key="****" + account.kraken_api_key[-4:] if account.kraken_api_key else "",
-            kraken_private_key="****" + account.kraken_private_key[-4:] if account.kraken_private_key else "",
+            binance_api_key="****" + account.binance_api_key[-4:] if account.binance_api_key else "",
+            binance_secret_key="****" + account.binance_secret_key[-4:] if account.binance_secret_key else "",
             initial_capital=current_cash,
             current_cash=current_cash,
             frozen_cash=0.0,
             account_type=account.account_type,
-            is_active=account.is_active == "true"
+            is_active=account.is_active == "true",
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -138,29 +140,25 @@ async def create_trading_account(
 
 
 @router.get("/{account_id}", response_model=AccountOut)
-async def get_account_details(
-    account_id: int,
-    session_token: str,
-    db: Session = Depends(get_db)
-):
+async def get_account_details(account_id: int, session_token: str, db: Session = Depends(get_db)):
     """Get account details"""
     try:
         user_id = await get_current_user_id(session_token, db)
         account = get_account(db, account_id)
-        
+
         if not account:
             raise HTTPException(status_code=404, detail="Account not found")
-        
+
         if account.user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied")
-        
-        # Get balance from Kraken in real-time
+
+        # Get balance from Binance in real-time (single API call)
         try:
-            balance = get_kraken_balance_real_time(account)
+            balance, _ = get_balance_and_positions(account)
             current_cash = float(balance) if balance is not None else 0.0
         except Exception:
             current_cash = 0.0
-        
+
         return AccountOut(
             id=account.id,
             user_id=account.user_id,
@@ -168,15 +166,15 @@ async def get_account_details(
             model=account.model,
             base_url=account.base_url,
             api_key="****" + account.api_key[-4:] if account.api_key else "",
-            kraken_api_key="****" + account.kraken_api_key[-4:] if account.kraken_api_key else "",
-            kraken_private_key="****" + account.kraken_private_key[-4:] if account.kraken_private_key else "",
+            binance_api_key="****" + account.binance_api_key[-4:] if account.binance_api_key else "",
+            binance_secret_key="****" + account.binance_secret_key[-4:] if account.binance_secret_key else "",
             initial_capital=current_cash,
             current_cash=current_cash,
             frozen_cash=0.0,
             account_type=account.account_type,
-            is_active=account.is_active == "true"
+            is_active=account.is_active == "true",
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -186,38 +184,42 @@ async def get_account_details(
 
 @router.put("/{account_id}", response_model=AccountOut)
 async def update_trading_account(
-    account_id: int,
-    session_token: str,
-    account_data: AccountUpdate,
-    db: Session = Depends(get_db)
+    account_id: int, session_token: str, account_data: AccountUpdate, db: Session = Depends(get_db)
 ):
     """Update trading account"""
     try:
         user_id = await get_current_user_id(session_token, db)
         account = get_account(db, account_id)
-        
+
         if not account:
             raise HTTPException(status_code=404, detail="Account not found")
-        
+
         if account.user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied")
-        
+
         # Check if new name conflicts with existing accounts
         if account_data.name:
             existing_accounts = get_accounts_by_user(db, user_id, active_only=True)
             for acc in existing_accounts:
                 if acc.name == account_data.name and acc.id != account_id:
                     raise HTTPException(status_code=400, detail="Account name already exists")
-        
+
         updated_account = update_account(
             db=db,
             account_id=account_id,
             name=account_data.name,
             model=account_data.model,
             base_url=account_data.base_url,
-            api_key=account_data.api_key
+            api_key=account_data.api_key,
         )
-        
+
+        # Get balance from Binance in real-time (single API call)
+        try:
+            balance, _ = get_balance_and_positions(updated_account)
+            current_cash = float(balance) if balance is not None else 0.0
+        except Exception:
+            current_cash = 0.0
+
         return AccountOut(
             id=updated_account.id,
             user_id=updated_account.user_id,
@@ -225,20 +227,13 @@ async def update_trading_account(
             model=updated_account.model,
             base_url=updated_account.base_url,
             api_key="****" + updated_account.api_key[-4:] if updated_account.api_key else "",
-            # Get balance from Kraken in real-time
-            try:
-                balance = get_kraken_balance_real_time(updated_account)
-                current_cash = float(balance) if balance is not None else 0.0
-            except Exception:
-                current_cash = 0.0
-            
             initial_capital=current_cash,
             current_cash=current_cash,
             frozen_cash=0.0,
             account_type=updated_account.account_type,
-            is_active=updated_account.is_active == "true"
+            is_active=updated_account.is_active == "true",
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -247,25 +242,21 @@ async def update_trading_account(
 
 
 @router.delete("/{account_id}")
-async def delete_trading_account(
-    account_id: int,
-    session_token: str,
-    db: Session = Depends(get_db)
-):
+async def delete_trading_account(account_id: int, session_token: str, db: Session = Depends(get_db)):
     """Delete trading account (soft delete)"""
     try:
         user_id = await get_current_user_id(session_token, db)
         account = get_account(db, account_id)
-        
+
         if not account:
             raise HTTPException(status_code=404, detail="Account not found")
-        
+
         if account.user_id != user_id:
             raise HTTPException(status_code=403, detail="Access denied")
-        
+
         deactivate_account(db, account_id)
         return {"message": f"Account {account.name} deactivated successfully"}
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -274,10 +265,7 @@ async def delete_trading_account(
 
 
 @router.get("/{account_id}/default")
-async def get_or_create_default(
-    session_token: str,
-    db: Session = Depends(get_db)
-):
+async def get_or_create_default(session_token: str, db: Session = Depends(get_db)):
     """Get or create default account (for backward compatibility)"""
     try:
         user_id = await get_current_user_id(session_token, db)
@@ -286,13 +274,13 @@ async def get_or_create_default(
         if not account:
             raise HTTPException(status_code=404, detail="No accounts found. Please create an account first.")
 
-        # Get balance from Kraken in real-time
+        # Get balance from Binance in real-time (single API call)
         try:
-            balance = get_kraken_balance_real_time(account)
+            balance, _ = get_balance_and_positions(account)
             current_cash = float(balance) if balance is not None else 0.0
         except Exception:
             current_cash = 0.0
-        
+
         return AccountOut(
             id=account.id,
             user_id=account.user_id,
@@ -300,15 +288,15 @@ async def get_or_create_default(
             model=account.model,
             base_url=account.base_url,
             api_key="****" + account.api_key[-4:] if account.api_key else "",
-            kraken_api_key="****" + account.kraken_api_key[-4:] if account.kraken_api_key else "",
-            kraken_private_key="****" + account.kraken_private_key[-4:] if account.kraken_private_key else "",
+            binance_api_key="****" + account.binance_api_key[-4:] if account.binance_api_key else "",
+            binance_secret_key="****" + account.binance_secret_key[-4:] if account.binance_secret_key else "",
             initial_capital=current_cash,
             current_cash=current_cash,
             frozen_cash=0.0,
             account_type=account.account_type,
-            is_active=account.is_active == "true"
+            is_active=account.is_active == "true",
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:

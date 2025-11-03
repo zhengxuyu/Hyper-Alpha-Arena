@@ -36,8 +36,8 @@ interface AIAccountCreate extends TradingAccountCreate {
   model?: string
   base_url?: string
   api_key?: string
-  kraken_api_key?: string
-  kraken_private_key?: string
+  binance_api_key?: string
+  binance_secret_key?: string
 }
 
 export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, embedded = false }: SettingsDialogProps) {
@@ -62,8 +62,8 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
     base_url: '',
     api_key: 'default-key-please-update-in-settings',
     auto_trading_enabled: true,
-    kraken_api_key: '',
-    kraken_private_key: '',
+    binance_api_key: '',
+    binance_secret_key: '',
   })
 
   const loadAccounts = async () => {
@@ -204,7 +204,7 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
       console.log('Updating account with data:', editAccount)
       await updateAccount(editingId, editAccount)
       setEditingId(null)
-      setEditAccount({ name: '', model: '', base_url: '', api_key: '', auto_trading_enabled: true, kraken_api_key: '', kraken_private_key: '' })
+      setEditAccount({ name: '', model: '', base_url: '', api_key: '', auto_trading_enabled: true, binance_api_key: '', binance_secret_key: '' })
       setTestResult(null)
       await loadAccounts()
 
@@ -232,14 +232,14 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
       base_url: account.base_url || '',
       api_key: account.api_key || '',
       auto_trading_enabled: account.auto_trading_enabled ?? true,
-      kraken_api_key: account.kraken_api_key || '',
-      kraken_private_key: account.kraken_private_key || '',
+      binance_api_key: account.binance_api_key || '',
+      binance_secret_key: account.binance_secret_key || '',
     })
   }
 
   const cancelEdit = () => {
     setEditingId(null)
-    setEditAccount({ name: '', model: '', base_url: '', api_key: 'default-key-please-update-in-settings', auto_trading_enabled: true, kraken_api_key: '', kraken_private_key: '' })
+      setEditAccount({ name: '', model: '', base_url: '', api_key: 'default-key-please-update-in-settings', auto_trading_enabled: true, binance_api_key: '', binance_secret_key: '' })
     setTestResult(null)
     setError(null)
   }
@@ -379,16 +379,16 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
                         onChange={(e) => setEditAccount({ ...editAccount, api_key: e.target.value })}
                       />
                       <Input
-                        placeholder="Kraken API Key"
+                        placeholder="Binance API Key"
                         type="password"
-                        value={editAccount.kraken_api_key || ''}
-                        onChange={(e) => setEditAccount({ ...editAccount, kraken_api_key: e.target.value })}
+                        value={editAccount.binance_api_key || ''}
+                        onChange={(e) => setEditAccount({ ...editAccount, binance_api_key: e.target.value })}
                       />
                       <Input
-                        placeholder="Kraken Private Key"
+                        placeholder="Binance Secret Key"
                         type="password"
-                        value={editAccount.kraken_private_key || ''}
-                        onChange={(e) => setEditAccount({ ...editAccount, kraken_private_key: e.target.value })}
+                        value={editAccount.binance_secret_key || ''}
+                        onChange={(e) => setEditAccount({ ...editAccount, binance_secret_key: e.target.value })}
                       />
                       <label className="flex items-center gap-2 text-sm text-muted-foreground">
                         <input
@@ -446,7 +446,7 @@ export default function SettingsDialog({ open, onOpenChange, onAccountUpdated, e
                           </div>
                         )}
                         <div className="text-xs text-muted-foreground">
-                          Balance: Fetched from Kraken in real-time
+                          Balance: Fetched from Binance in real-time
                         </div>
                       </div>
                       <div className="flex items-center gap-2">

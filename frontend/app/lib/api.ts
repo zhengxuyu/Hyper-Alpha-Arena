@@ -155,8 +155,8 @@ export interface TradingAccount {
   account_type: string  // "AI" or "MANUAL"
   is_active: boolean
   auto_trading_enabled?: boolean
-  kraken_api_key?: string
-  kraken_private_key?: string
+  binance_api_key?: string
+  binance_secret_key?: string
 }
 
 export interface TradingAccountCreate {
@@ -164,8 +164,8 @@ export interface TradingAccountCreate {
   model?: string
   base_url?: string
   api_key?: string
-  kraken_api_key?: string
-  kraken_private_key?: string
+  binance_api_key?: string
+  binance_secret_key?: string
   account_type?: string
   auto_trading_enabled?: boolean
 }
@@ -175,8 +175,8 @@ export interface TradingAccountUpdate {
   model?: string
   base_url?: string
   api_key?: string
-  kraken_api_key?: string
-  kraken_private_key?: string
+  binance_api_key?: string
+  binance_secret_key?: string
   auto_trading_enabled?: boolean
 }
 
@@ -351,7 +351,7 @@ export async function getOverview(): Promise<any> {
 }
 
 // DEPRECATED: Paper trading removed, only real trading is supported
-// Data is now fetched from Kraken in real-time
+// Data is now fetched from Binance in real-time
 
 export async function createAccount(account: TradingAccountCreate): Promise<TradingAccount> {
   const response = await apiRequest('/account/', {
@@ -361,8 +361,8 @@ export async function createAccount(account: TradingAccountCreate): Promise<Trad
       model: account.model,
       base_url: account.base_url,
       api_key: account.api_key,
-      kraken_api_key: (account as any).kraken_api_key || '',
-      kraken_private_key: (account as any).kraken_private_key || '',
+      binance_api_key: account.binance_api_key || '',
+      binance_secret_key: account.binance_secret_key || '',
       account_type: account.account_type || 'AI',
       auto_trading_enabled: account.auto_trading_enabled ?? true,
     })
@@ -376,8 +376,8 @@ export async function updateAccount(accountId: number, account: TradingAccountUp
     model: account.model,
     base_url: account.base_url,
     api_key: account.api_key,
-    kraken_api_key: account.kraken_api_key,
-    kraken_private_key: account.kraken_private_key,
+    binance_api_key: account.binance_api_key,
+    binance_secret_key: account.binance_secret_key,
     auto_trading_enabled: account.auto_trading_enabled,
   }
 

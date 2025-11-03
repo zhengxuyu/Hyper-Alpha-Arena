@@ -13,11 +13,11 @@ def create_account(
     model: str = "gpt-4-turbo",
     base_url: str = "https://api.openai.com/v1",
     api_key: str = None,
-    kraken_api_key: str = None,
-    kraken_private_key: str = None
+    binance_api_key: str = None,
+    binance_secret_key: str = None,
 ) -> Account:
-    """Create a new trading account - only stores LLM config and Kraken API keys.
-    Balance and positions are fetched from Kraken in real-time."""
+    """Create a new trading account - only stores LLM config and Binance API keys.
+    Balance and positions are fetched from Binance in real-time."""
     account = Account(
         user_id=user_id,
         version="v1",
@@ -26,9 +26,9 @@ def create_account(
         model=model if account_type == "AI" else None,
         base_url=base_url if account_type == "AI" else None,
         api_key=api_key if account_type == "AI" else None,
-        kraken_api_key=kraken_api_key,
-        kraken_private_key=kraken_private_key,
-        is_active="true"
+        binance_api_key=binance_api_key,
+        binance_secret_key=binance_secret_key,
+        is_active="true",
     )
     db.add(account)
     db.commit()
@@ -56,11 +56,11 @@ def get_or_create_default_account(
     model: str = "gpt-4-turbo",
     base_url: str = "https://api.openai.com/v1",
     api_key: str = "default-key-please-update-in-settings",
-    kraken_api_key: str = None,
-    kraken_private_key: str = None
+    binance_api_key: str = None,
+    binance_secret_key: str = None,
 ) -> Optional[Account]:
     """Get existing account or create default account for new users.
-    Balance and positions are fetched from Kraken in real-time."""
+    Balance and positions are fetched from Binance in real-time."""
     # Check if user has any accounts
     existing_accounts = get_accounts_by_user(db, user_id, active_only=True)
     if existing_accounts:
@@ -75,24 +75,19 @@ def get_or_create_default_account(
         model=model,
         base_url=base_url,
         api_key=api_key,
-        kraken_api_key=kraken_api_key,
-        kraken_private_key=kraken_private_key
+        binance_api_key=binance_api_key,
+        binance_secret_key=binance_secret_key,
     )
 
 
 def update_account(
-    db: Session,
-    account_id: int,
-    name: str = None,
-    model: str = None,
-    base_url: str = None,
-    api_key: str = None
+    db: Session, account_id: int, name: str = None, model: str = None, base_url: str = None, api_key: str = None
 ) -> Optional[Account]:
     """Update account information"""
     account = db.query(Account).filter(Account.id == account_id).first()
     if not account:
         return None
-    
+
     if name is not None:
         account.name = name
     if model is not None:
@@ -101,13 +96,13 @@ def update_account(
         account.base_url = base_url
     if api_key is not None:
         account.api_key = api_key
-    
+
     db.commit()
     db.refresh(account)
     return account
 
 
-# DEPRECATED: update_account_cash removed - balance is now fetched from Kraken in real-time
+# DEPRECATED: update_account_cash removed - balance is now fetched from Binance in real-time
 
 
 def deactivate_account(db: Session, account_id: int) -> Optional[Account]:
@@ -115,7 +110,7 @@ def deactivate_account(db: Session, account_id: int) -> Optional[Account]:
     account = db.query(Account).filter(Account.id == account_id).first()
     if not account:
         return None
-    
+
     account.is_active = "false"
     db.commit()
     db.refresh(account)
@@ -127,7 +122,7 @@ def activate_account(db: Session, account_id: int) -> Optional[Account]:
     account = db.query(Account).filter(Account.id == account_id).first()
     if not account:
         return None
-    
+
     account.is_active = "true"
     db.commit()
     db.refresh(account)

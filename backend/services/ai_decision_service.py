@@ -1,6 +1,7 @@
 """
 AI Decision Service - Handles AI model API calls for trading decisions
 """
+
 import asyncio
 import json
 import logging
@@ -12,13 +13,14 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 import requests
-from database.models import Account, AIDecisionLog, Position
+from database.models import Account, AIDecisionLog
 from repositories import prompt_repo
 from repositories.strategy_repo import set_last_trigger
+
 # Dynamic import to avoid circular dependency with api.ws
 # Note: api.ws imports scheduler, scheduler imports trading_commands, trading_commands imports ai_decision_service
-from services.asset_calculator import calc_positions_value
-from services.kraken_sync import get_kraken_balance_real_time
+from services.broker_adapter import get_balance_and_positions
+from services.market_data import get_last_price
 from services.news_feed import fetch_latest_news
 from services.system_logger import system_logger
 from sqlalchemy.orm import Session
@@ -28,15 +30,12 @@ logger = logging.getLogger(__name__)
 # SSL verification configuration
 # Set to True to enable SSL verification (recommended for production)
 # Set to False only for custom AI endpoints with self-signed certificates
-ENABLE_SSL_VERIFICATION = False  # TODO: Move to config file for production use
+import os
+
+ENABLE_SSL_VERIFICATION = os.getenv("ENABLE_SSL_VERIFICATION", "false").lower() == "true"
 
 #  mode API keys that should be skipped
-DEMO_API_KEYS = {
-    "default-key-please-update-in-settings",
-    "default",
-    "",
-    None
-}
+DEMO_API_KEYS = {"default-key-please-update-in-settings", "default", "", None}
 
 SUPPORTED_SYMBOLS: Dict[str, str] = {
     "BTC": "Bitcoin",
@@ -92,10 +91,17 @@ def _build_session_context(account: Account) -> str:
 
 def _build_account_state(portfolio: Dict[str, Any]) -> str:
     positions: Dict[str, Dict[str, Any]] = portfolio.get("positions", {})
+
+    # Import commission rate constants
+    from database.models import CRYPTO_COMMISSION_RATE, CRYPTO_MIN_COMMISSION
+
     lines = [
-        f"Available Cash (USD): {_format_currency(portfolio.get('cash'))}",
-        f"Frozen Cash (USD): {_format_currency(portfolio.get('frozen_cash'))}",
-        f"Total Assets (USD): {_format_currency(portfolio.get('total_assets'))}",
+        f"Available Cash (USDT): {_format_currency(portfolio.get('cash'))}",
+        f"Frozen Cash (USDT): {_format_currency(portfolio.get('frozen_cash'))}",
+        f"Total Assets (USDT): {_format_currency(portfolio.get('total_assets'))}",
+        "",
+        f"Trading Fees: {CRYPTO_COMMISSION_RATE * 100:.2f}% per trade (minimum {CRYPTO_MIN_COMMISSION} USDT)",
+        f"Note: When buying, you need {CRYPTO_COMMISSION_RATE * 100:.2f}% extra cash for fees. When selling, you receive {CRYPTO_COMMISSION_RATE * 100:.2f}% less due to fees.",
         "",
         "Open Positions:",
     ]
@@ -133,13 +139,13 @@ def _build_market_snapshot(prices: Dict[str, float], positions: Dict[str, Dict[s
 
 
 OUTPUT_FORMAT_JSON = (
-    '{\n'
+    "{\n"
     '  "operation": "buy" | "sell" | "hold" | "close",\n'
     '  "symbol": "<BTC|ETH|SOL|BNB|XRP|DOGE>",\n'
     '  "target_portion_of_balance": <float 0.0-1.0>,\n'
     '  "reason": "<150 characters maximum>",\n'
     '  "trading_strategy": "<2-3 sentences covering signals, risk, execution>"\n'
-    '}'
+    "}"
 )
 
 
@@ -150,6 +156,10 @@ DECISION_TASK_TEXT = (
     "- Respect risk: keep new exposure within reasonable fractions of available cash (default ≤ 0.2).\n"
     "- Close positions when invalidation conditions are met or risk is excessive.\n"
     "- When data is missing (marked N/A), acknowledge uncertainty before deciding.\n"
+    "- IMPORTANT: Account for trading fees when calculating trade sizes. Each trade incurs a commission fee (see Trading Fees in Account State).\n"
+    "  For BUY orders: Ensure you have enough cash to cover the purchase amount PLUS fees (typically ~0.1% extra).\n"
+    "  For SELL orders: You will receive the sale amount MINUS fees (typically ~0.1% less).\n"
+    "  Example: Buying 100 USDT worth requires ~100.10 USDT total (100 + 0.10 fee). Selling 100 USDT worth gives ~99.90 USDT (100 - 0.10 fee).\n"
 )
 
 
@@ -185,33 +195,52 @@ def _is_default_api_key(api_key: str) -> bool:
 
 
 def _get_portfolio_data(db: Session, account: Account) -> Dict:
-    """Get current portfolio positions and values"""
-    positions = db.query(Position).filter(
-        Position.account_id == account.id,
-        Position.market == "CRYPTO"
-    ).all()
-    
-    portfolio = {}
-    for pos in positions:
-        if float(pos.quantity) > 0:
-            portfolio[pos.symbol] = {
-                "quantity": float(pos.quantity),
-                "avg_cost": float(pos.avg_cost),
-                "current_value": float(pos.quantity) * float(pos.avg_cost)
-            }
-    
-    # Get balance from Kraken in real-time
+    """Get current portfolio positions and values from Binance in real-time"""
+    # Get balance and positions from Binance in real-time (single API call)
+    # This ensures we use actual current positions, not stale database records
     try:
-        balance = get_kraken_balance_real_time(account)
+        balance, positions_data = get_balance_and_positions(account)
         current_cash = float(balance) if balance is not None else 0.0
     except Exception:
         current_cash = 0.0
-    
+        positions_data = []
+
+    # Build portfolio from Binance real-time positions
+    portfolio = {}
+    positions_value = 0.0
+
+    for pos in positions_data:
+        symbol = (pos.get("symbol") or "").upper()
+        if not symbol:
+            continue
+
+        quantity = float(pos.get("quantity", 0) or 0)
+        if quantity <= 0:
+            continue
+
+        # Get current price for accurate valuation
+        try:
+            current_price = float(get_last_price(symbol, "CRYPTO"))
+        except Exception:
+            # Fallback to avg_cost if price unavailable
+            current_price = float(pos.get("avg_cost", 0) or 0)
+
+        avg_cost = float(pos.get("avg_cost", 0) or 0)
+        current_value = current_price * quantity
+
+        portfolio[symbol] = {
+            "quantity": quantity,
+            "avg_cost": avg_cost if avg_cost > 0 else current_price,  # Use current_price as fallback
+            "current_value": current_value,
+        }
+
+        positions_value += current_value
+
     return {
         "cash": current_cash,
-        "frozen_cash": 0.0,  # Not tracked - all data from Kraken
+        "frozen_cash": 0.0,  # Not tracked - all data from Binance
         "positions": portfolio,
-        "total_assets": current_cash + calc_positions_value(db, account.id)
+        "total_assets": current_cash + positions_value,
     }
 
 
@@ -225,21 +254,21 @@ def build_chat_completion_endpoints(base_url: str, model: Optional[str] = None) 
     if not base_url:
         return []
 
-    normalized = base_url.strip().rstrip('/')
+    normalized = base_url.strip().rstrip("/")
     if not normalized:
         return []
 
     endpoints: List[str] = []
     base_lower = normalized.lower()
-    
+
     # Check if base_url already includes a path (e.g., Azure OpenAI with /openai/v1/)
     # Azure OpenAI format: https://xxx.azure.com/openai/v1/
     # If it ends with /v1 or /v1/, it's likely Azure OpenAI format
-    if base_lower.endswith('/openai/v1') or base_lower.endswith('/openai/v1/'):
+    if base_lower.endswith("/openai/v1") or base_lower.endswith("/openai/v1/"):
         # Azure OpenAI: base_url is already the complete path, just append /chat/completions
         endpoints.append(f"{normalized.rstrip('/')}/chat/completions")
         return endpoints
-    
+
     # Standard OpenAI-compatible API
     endpoints.append(f"{normalized}/chat/completions")
 
@@ -247,7 +276,7 @@ def build_chat_completion_endpoints(base_url: str, model: Optional[str] = None) 
 
     if is_deepseek:
         # Deepseek 官方同时支持 https://api.deepseek.com/chat/completions 和 /v1/chat/completions。
-        if base_lower.endswith('/v1'):
+        if base_lower.endswith("/v1"):
             without_v1 = normalized[:-3]
             endpoints.append(f"{without_v1}/chat/completions")
         else:
@@ -316,7 +345,7 @@ def call_ai_for_decision(
     if _is_default_api_key(account.api_key):
         logger.info(f"Skipping AI trading for account {account.name} - using default API key")
         return None
-    
+
     try:
         news_summary = fetch_latest_news()
         news_section = news_summary if news_summary else "No recent CoinJournal news available."
@@ -414,7 +443,7 @@ def call_ai_for_decision(
                             f"SSL verification disabled for AI endpoint {endpoint}. "
                             "This should only be used for custom endpoints with self-signed certificates."
                         )
-                    
+
                     response = requests.post(
                         endpoint,
                         headers=headers,
@@ -540,11 +569,7 @@ def call_ai_for_decision(
                 logger.warning("Initial JSON parse failed: %s", parse_err)
                 logger.warning("Problematic content: %s...", cleaned_content[:200])
 
-                cleaned = (
-                    cleaned_content.replace("\n", " ")
-                    .replace("\r", " ")
-                    .replace("\t", " ")
-                )
+                cleaned = cleaned_content.replace("\n", " ").replace("\r", " ").replace("\t", " ")
                 cleaned = cleaned.replace("“", '"').replace("”", '"')
                 cleaned = cleaned.replace("‘", "'").replace("’", "'")
                 cleaned = cleaned.replace("–", "-").replace("—", "-").replace("‑", "-")
@@ -587,7 +612,9 @@ def call_ai_for_decision(
             else:
                 decision["_reasoning_snapshot"] = reasoning_text or ""
             # Use the most recent cleaned JSON payload; fall back to raw text if parsing succeeded via manual extraction
-            snapshot_source = cleaned_content if 'cleaned_content' in locals() and cleaned_content else raw_decision_text
+            snapshot_source = (
+                cleaned_content if "cleaned_content" in locals() and cleaned_content else raw_decision_text
+            )
             decision["_raw_decision_text"] = snapshot_source
 
             logger.info(f"AI decision for {account.name}: {decision}")
@@ -595,7 +622,7 @@ def call_ai_for_decision(
 
         logger.error(f"Unexpected AI response format: {result}")
         return None
-        
+
     except requests.RequestException as err:
         logger.error(f"AI API request failed: {err}")
         return None
@@ -603,7 +630,7 @@ def call_ai_for_decision(
         logger.error(f"Failed to parse AI response as JSON: {err}")
         # Try to log the content that failed to parse
         try:
-            if 'text_content' in locals():
+            if "text_content" in locals():
                 logger.error(f"Content that failed to parse: {text_content[:500]}")
         except Exception as log_err:
             logger.warning(f"Failed to log parsing error content: {log_err}")
@@ -613,13 +640,35 @@ def call_ai_for_decision(
         return None
 
 
-def save_ai_decision(db: Session, account: Account, decision: Dict, portfolio: Dict, executed: bool = False, order_id: Optional[int] = None) -> None:
+def save_ai_decision(
+    db: Session,
+    account: Account,
+    decision: Dict,
+    portfolio: Dict,
+    executed: bool = False,
+    order_id: Optional[int] = None,
+) -> None:
     """Save AI decision to the decision log"""
     try:
+        # Check if decision is None or not a dict
+        if decision is None:
+            logger.warning(f"Cannot save AI decision: decision is None for account {account.name}")
+            return
+
+        if not isinstance(decision, dict):
+            logger.warning(
+                f"Cannot save AI decision: decision is not a dict (type: {type(decision)}) for account {account.name}"
+            )
+            return
+
         operation = decision.get("operation", "").lower() if decision.get("operation") else ""
         symbol_raw = decision.get("symbol")
         symbol = symbol_raw.upper() if symbol_raw else None
-        target_portion = float(decision.get("target_portion_of_balance", 0)) if decision.get("target_portion_of_balance") is not None else 0.0
+        target_portion = (
+            float(decision.get("target_portion_of_balance", 0))
+            if decision.get("target_portion_of_balance") is not None
+            else 0.0
+        )
         reason = decision.get("reason", "No reason provided")
         prompt_snapshot = decision.get("_prompt_snapshot")
         reasoning_snapshot = decision.get("_reasoning_snapshot")
@@ -636,16 +685,16 @@ def save_ai_decision(db: Session, account: Account, decision: Dict, portfolio: D
             extracted_reasoning: Optional[str] = None
             if candidate:
                 # Try to strip JSON payload to keep narrative reasoning only
-                json_start = candidate.find('{')
-                json_end = candidate.rfind('}')
+                json_start = candidate.find("{")
+                json_end = candidate.rfind("}")
                 if json_start != -1 and json_end != -1 and json_end > json_start:
                     prefix = candidate[:json_start].strip()
                     suffix = candidate[json_end + 1 :].strip()
                     parts = [part for part in (prefix, suffix) if part]
                     if parts:
-                        extracted_reasoning = '\n\n'.join(parts)
+                        extracted_reasoning = "\n\n".join(parts)
                 else:
-                    extracted_reasoning = candidate if not candidate.startswith('{') else None
+                    extracted_reasoning = candidate if not candidate.startswith("{") else None
 
             if extracted_reasoning:
                 reasoning_snapshot = extracted_reasoning
@@ -673,7 +722,7 @@ def save_ai_decision(db: Session, account: Account, decision: Dict, portfolio: D
             order_id=order_id,
             prompt_snapshot=prompt_snapshot,
             reasoning_snapshot=reasoning_snapshot,
-            decision_snapshot=decision_snapshot_structured or raw_decision_snapshot
+            decision_snapshot=decision_snapshot_structured or raw_decision_snapshot,
         )
 
         db.add(decision_log)
@@ -684,8 +733,10 @@ def save_ai_decision(db: Session, account: Account, decision: Dict, portfolio: D
             set_last_trigger(db, account.id, decision_log.decision_time)
 
         symbol_str = symbol if symbol else "N/A"
-        logger.info(f"Saved AI decision log for account {account.name}: {operation} {symbol_str} "
-                   f"prev_portion={prev_portion:.4f} target_portion={target_portion:.4f} executed={executed}")
+        logger.info(
+            f"Saved AI decision log for account {account.name}: {operation} {symbol_str} "
+            f"prev_portion={prev_portion:.4f} target_portion={target_portion:.4f} executed={executed}"
+        )
 
         # Log to system logger
         system_logger.log_ai_decision(
@@ -694,32 +745,41 @@ def save_ai_decision(db: Session, account: Account, decision: Dict, portfolio: D
             operation=operation,
             symbol=symbol,
             reason=reason,
-            success=executed
+            success=executed,
         )
 
         # Broadcast AI decision update via WebSocket
         # Use dynamic import to avoid circular dependency with api.ws
         try:
             from api.ws import broadcast_model_chat_update, manager
+
             # Use manager's schedule_task for thread-safe async execution
-            manager.schedule_task(broadcast_model_chat_update({
-                "id": decision_log.id,
-                "account_id": account.id,
-                "account_name": account.name,
-                "model": account.model,
-                "decision_time": decision_log.decision_time.isoformat() if hasattr(decision_log.decision_time, 'isoformat') else str(decision_log.decision_time),
-                "operation": decision_log.operation.upper() if decision_log.operation else "HOLD",
-                "symbol": decision_log.symbol,
-                "reason": decision_log.reason,
-                "prev_portion": float(decision_log.prev_portion),
-                "target_portion": float(decision_log.target_portion),
-                "total_balance": float(decision_log.total_balance),
-                "executed": decision_log.executed == "true",
-                "order_id": decision_log.order_id,
-                "prompt_snapshot": decision_log.prompt_snapshot,
-                "reasoning_snapshot": decision_log.reasoning_snapshot,
-                "decision_snapshot": decision_log.decision_snapshot
-            }))
+            manager.schedule_task(
+                broadcast_model_chat_update(
+                    {
+                        "id": decision_log.id,
+                        "account_id": account.id,
+                        "account_name": account.name,
+                        "model": account.model,
+                        "decision_time": (
+                            decision_log.decision_time.isoformat()
+                            if hasattr(decision_log.decision_time, "isoformat")
+                            else str(decision_log.decision_time)
+                        ),
+                        "operation": decision_log.operation.upper() if decision_log.operation else "HOLD",
+                        "symbol": decision_log.symbol,
+                        "reason": decision_log.reason,
+                        "prev_portion": float(decision_log.prev_portion),
+                        "target_portion": float(decision_log.target_portion),
+                        "total_balance": float(decision_log.total_balance),
+                        "executed": decision_log.executed == "true",
+                        "order_id": decision_log.order_id,
+                        "prompt_snapshot": decision_log.prompt_snapshot,
+                        "reasoning_snapshot": decision_log.reasoning_snapshot,
+                        "decision_snapshot": decision_log.decision_snapshot,
+                    }
+                )
+            )
         except Exception as broadcast_err:
             # Don't fail the save operation if broadcast fails
             logger.warning(f"Failed to broadcast AI decision update: {broadcast_err}")
@@ -731,20 +791,20 @@ def save_ai_decision(db: Session, account: Account, decision: Dict, portfolio: D
 
 def get_active_ai_accounts(db: Session) -> List[Account]:
     """Get all active AI accounts that are not using default API key"""
-    accounts = db.query(Account).filter(
-        Account.is_active == "true",
-        Account.account_type == "AI",
-        Account.auto_trading_enabled == "true"
-    ).all()
-    
+    accounts = (
+        db.query(Account)
+        .filter(Account.is_active == "true", Account.account_type == "AI", Account.auto_trading_enabled == "true")
+        .all()
+    )
+
     if not accounts:
         return []
-    
+
     # Filter out default accounts
     valid_accounts = [acc for acc in accounts if not _is_default_api_key(acc.api_key)]
-    
+
     if not valid_accounts:
         logger.debug("No valid AI accounts found (all using default keys)")
         return []
-        
+
     return valid_accounts

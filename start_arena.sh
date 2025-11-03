@@ -114,37 +114,55 @@ if command -v lsof &> /dev/null; then
     fi
 fi
 
-# Check if virtual environment exists, create if not
-if [ ! -f ".venv/bin/python" ]; then
-    echo "Creating Python virtual environment..."
-    python3 -m venv .venv
+# Change to backend directory
+cd "$BACKEND_DIR"
+
+# Check if uv is available, use it to sync dependencies
+if command -v uv &> /dev/null; then
+    echo "Syncing dependencies with uv..."
+    uv sync
     if [ $? -ne 0 ]; then
-        echo "ERROR: Failed to create virtual environment"
+        echo "ERROR: Failed to sync dependencies with uv"
         exit 1
+    fi
+    # Use uv to run the service
+    PYTHON_CMD="uv run python"
+else
+    # Fallback to traditional venv approach
+    echo "uv not found, using traditional venv approach..."
+    # Check if virtual environment exists, create if not
+    if [ ! -f ".venv/bin/python" ]; then
+        echo "Creating Python virtual environment..."
+        python3 -m venv .venv
+        if [ $? -ne 0 ]; then
+            echo "ERROR: Failed to create virtual environment"
+            exit 1
+        fi
+
+        echo "Installing Python dependencies..."
+        .venv/bin/pip install -e .
+        if [ $? -ne 0 ]; then
+            echo "ERROR: Failed to install Python dependencies"
+            exit 1
+        fi
+        echo "Python environment setup completed"
     fi
 
-    echo "Installing Python dependencies..."
-    .venv/bin/pip install -e .
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Failed to install Python dependencies"
-        exit 1
+    # Check if uvicorn is available in virtual environment
+    if ! .venv/bin/python -c "import uvicorn" 2>/dev/null; then
+        echo "ERROR: uvicorn not found in virtual environment."
+        echo "Installing required dependencies..."
+        .venv/bin/pip install -e .
+        if [ $? -ne 0 ]; then
+            echo "ERROR: Failed to install dependencies."
+            exit 1
+        fi
     fi
-    echo "Python environment setup completed"
-fi
-
-# Check if uvicorn is available in virtual environment
-if ! .venv/bin/python -c "import uvicorn" 2>/dev/null; then
-    echo "ERROR: uvicorn not found in virtual environment."
-    echo "Installing required dependencies..."
-    .venv/bin/pip install -e .
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Failed to install dependencies."
-        exit 1
-    fi
+    PYTHON_CMD=".venv/bin/python"
 fi
 
 # Start service in background
-nohup .venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8802 > ../arena.log 2>&1 &
+nohup $PYTHON_CMD -m uvicorn main:app --host 0.0.0.0 --port 8802 > ../arena.log 2>&1 &
 echo $! > ../arena.pid
 
 # Wait for service to start with retry logic

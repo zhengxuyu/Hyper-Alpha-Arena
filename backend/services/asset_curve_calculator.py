@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from database.models import Account, AccountAssetSnapshot
-from services.kraken_sync import get_kraken_balance_real_time
+from services.broker_adapter import get_balance_and_positions
+from services.market_data import get_last_price
 from sqlalchemy import cast, func
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.types import Integer
@@ -42,9 +43,7 @@ def _ensure_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def _get_bucketed_snapshots(
-    db: Session, bucket_minutes: int
-) -> List[Tuple[int, float, float, float, datetime]]:
+def _get_bucketed_snapshots(db: Session, bucket_minutes: int) -> List[Tuple[int, float, float, float, datetime]]:
     """
     Query snapshots grouped by bucket using SQL aggregation.
 
@@ -134,17 +133,32 @@ def get_all_asset_curves_data_new(db: Session, timeframe: str = "1h") -> List[Di
             }
         )
 
-    # Ensure accounts without snapshots still appear with their current balance from Kraken
+    # Ensure accounts without snapshots still appear with their current balance from Binance
     now_utc = datetime.now(timezone.utc)
     for account in accounts:
         if account.id not in seen_accounts:
-            # Get balance from Kraken in real-time
+            # Get balance and positions from Binance in real-time (single API call)
             try:
-                balance = get_kraken_balance_real_time(account)
+                balance, positions_data = get_balance_and_positions(account)
                 current_cash = float(balance) if balance is not None else 0.0
-            except Exception:
+
+                # Calculate positions value
+                positions_value = 0.0
+                for pos in positions_data:
+                    try:
+                        price = get_last_price(pos["symbol"], "CRYPTO")
+                        if price:
+                            positions_value += float(price) * float(pos["quantity"])
+                    except Exception:
+                        pass
+
+                total_assets = current_cash + positions_value
+            except Exception as e:
+                logger.debug(f"Failed to get Binance data for account {account.id}: {e}")
                 current_cash = 0.0
-            
+                positions_value = 0.0
+                total_assets = 0.0
+
             result.append(
                 {
                     "timestamp": int(now_utc.timestamp()),
@@ -152,9 +166,9 @@ def get_all_asset_curves_data_new(db: Session, timeframe: str = "1h") -> List[Di
                     "account_id": account.id,
                     "user_id": account.user_id,
                     "username": account.name,
-                    "total_assets": current_cash,
+                    "total_assets": total_assets,
                     "cash": current_cash,
-                    "positions_value": 0.0,
+                    "positions_value": positions_value,
                 }
             )
 

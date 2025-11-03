@@ -16,9 +16,9 @@ class MarketConfig(BaseModel):
 DEFAULT_TRADING_CONFIGS: Dict[str, MarketConfig] = {
     "CRYPTO": MarketConfig(
         market="CRYPTO",
-        min_commission=0.1,  # $0.1 minimum commission for crypto
+        min_commission=0.1,  # 0.1 USDT minimum commission for crypto
         commission_rate=0.001,  # 0.1% commission rate (typical for crypto)
-        exchange_rate=1.0,  # USD base
+        exchange_rate=1.0,  # USDT base
         min_order_quantity=1,  # Can trade fractional amounts
         lot_size=1,
     ),

@@ -1,9 +1,16 @@
 import uuid
 from decimal import Decimal
 
-from database.models import (US_COMMISSION_RATE, US_LOT_SIZE,
-                             US_MIN_COMMISSION, US_MIN_ORDER_QUANTITY, Order,
-                             Position, Trade, User)
+from database.models import (
+    US_COMMISSION_RATE,
+    US_LOT_SIZE,
+    US_MIN_COMMISSION,
+    US_MIN_ORDER_QUANTITY,
+    Order,
+    Position,
+    Trade,
+    User,
+)
 from sqlalchemy.orm import Session
 
 from .market_data import get_last_price
@@ -14,7 +21,18 @@ def _calc_commission(notional: Decimal) -> Decimal:
     min_fee = Decimal(str(US_MIN_COMMISSION))
     return max(pct_fee, min_fee)
 
-def place_and_execute(db: Session, user: User, symbol: str, name: str, market: str, side: str, order_type: str, price: float | None, quantity: int) -> Order:
+
+def place_and_execute(
+    db: Session,
+    user: User,
+    symbol: str,
+    name: str,
+    market: str,
+    side: str,
+    order_type: str,
+    price: float | None,
+    quantity: int,
+) -> Order:
     # Only support US market
     if market != "US":
         raise ValueError("Only US market is supported")
@@ -50,9 +68,9 @@ def place_and_execute(db: Session, user: User, symbol: str, name: str, market: s
     if side == "BUY":
         cash_needed = notional + commission
         if Decimal(str(user.current_cash)) < cash_needed:
-            raise ValueError("Insufficient USD cash")
+            raise ValueError("Insufficient USDT")
         user.current_cash = float(Decimal(str(user.current_cash)) - cash_needed)
-        
+
         # position update (avg cost)
         pos = (
             db.query(Position)
@@ -87,7 +105,7 @@ def place_and_execute(db: Session, user: User, symbol: str, name: str, market: s
             raise ValueError("Insufficient position to sell")
         pos.quantity = int(pos.quantity) - quantity
         pos.available_quantity = int(pos.available_quantity) - quantity
-        
+
         cash_gain = notional - commission
         user.current_cash = float(Decimal(str(user.current_cash)) + cash_gain)
 
